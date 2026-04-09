@@ -841,7 +841,8 @@ def _delete_notebook_file(*, notebook_path: str, session: dict | None = None) ->
 
 def _build_notebook_url(*, notebook_path: str, session_token: str) -> str:
     safe_path = quote(notebook_path.lstrip("/"), safe="/@._-~")
-    return f"{_proxy_base_path()}/lab/tree/{safe_path}?token={session_token}"
+    # 使用相对路径，通过前端代理访问 Jupyter Lab 服务
+    return f"/jupyter/lab/tree/{safe_path}?token={session_token}"
 
 
 def _notebook_root_dir() -> Path:

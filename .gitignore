@@ -4,10 +4,39 @@ backtest/.jupyter/
 backtest/.gunicorn/
 backtest/research/notebooks/
 backtest/.venv/
+backtest/venv/
 backtest/__pycache__/
 backtest/*.py[cod]
 backtest/package-lock.json
-backtest/auth.sqlite3
+
+# Database files
+*.sqlite3
+*.sqlite
+*.db
+backtest/data/backtest/*.sqlite3
+backtest/data/backtest/*.sqlite
+backtest/data/backtest/*.db
+
+# RQAlpha bundle data (large files ~1G)
+backtest/data/rqalpha/bundle/*.h5
+backtest/data/rqalpha/bundle/*.pk
+backtest/data/rqalpha/bundle/*.npy
+backtest/data/rqalpha/bundle/*.json
+
+# Backtest result data
+backtest/data/backtest/runs/
+backtest/data/backtest/runs_index/
+backtest/data/backtest/dedupe_index/
+backtest/data/backtest/research/
+backtest/data/backtest/*.json
+
+# Parquet data files
+backtest/data/parquet/
+*.parquet
+
+# Result files
+*.pkl
+backtest/result.pkl
 
 # Frontend
 frontend/node_modules/

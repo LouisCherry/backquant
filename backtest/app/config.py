@@ -79,7 +79,7 @@ class Config:
     BACKTEST_COMPILE_TIMEOUT = _int_from_env("BACKTEST_COMPILE_TIMEOUT", 10)
     BACKTEST_KEEP_DAYS = _int_from_env("BACKTEST_KEEP_DAYS", 30)
     BACKTEST_IDEMPOTENCY_WINDOW_SECONDS = _int_from_env("BACKTEST_IDEMPOTENCY_WINDOW_SECONDS", 30)
-    BACKTEST_ALLOWED_FREQUENCIES = _list_from_env("BACKTEST_ALLOWED_FREQUENCIES", ("1d",))
+    BACKTEST_ALLOWED_FREQUENCIES = _list_from_env("BACKTEST_ALLOWED_FREQUENCIES", ("1d", "1m", "tick"))
     # Market data database path (default: <BACKTEST_BASE_DIR>/market_data.sqlite3).
     MARKET_DATA_DB_PATH = _str_from_env("MARKET_DATA_DB_PATH", "")
     # Database configuration (SQLite or MariaDB)
@@ -91,6 +91,13 @@ class Config:
     DB_PASSWORD = _str_from_env("DB_PASSWORD", "")
     # VnPy futures bar data table
     DB_TABLE = _str_from_env("DB_TABLE", "dbbardata")
+    # Parquet data storage configuration
+    PARQUET_ROOT_DIR = _abs_path_from_env(
+        "PARQUET_ROOT_DIR",
+        "data/parquet",
+    )
+    # Default storage type for market data: 'parquet' or 'db'
+    MARKET_DATA_STORAGE_TYPE = _str_from_env("MARKET_DATA_STORAGE_TYPE", "parquet")
     # Research workbench storage and notebook session settings.
     # RESEARCH_PUBLIC_BASE_URL is optional; when empty, request.host_url is used.
     RESEARCH_PUBLIC_BASE_URL = _str_from_env("RESEARCH_PUBLIC_BASE_URL", "")

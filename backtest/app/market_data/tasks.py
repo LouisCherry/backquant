@@ -207,8 +207,11 @@ def do_full_download(task_id: str):
         _start_msg = f'开始下载 {_bundle_name}...' if _bundle_name else '开始下载数据包...'
         tm.update_progress(task_id, 0, '一、下载', _start_msg)
 
-        cmd = ['rqalpha', 'download-bundle', '-d', temp_dir]
+        # Use the same command format as manual execution
+        cmd = ['rqalpha', 'download-bundle', '-d', str(temp_dir)]
         env = os.environ.copy()
+
+        tm.log(task_id, 'INFO', f'执行命令: {" ".join(cmd)}')
 
         process = subprocess.Popen(
             cmd, env=env,
@@ -218,9 +221,10 @@ def do_full_download(task_id: str):
             bufsize=1
         )
 
-        # Read output silently
+        # Read output to avoid buffer deadlock
         for line in process.stdout:
-            pass
+            # Log the output for debugging
+            tm.log(task_id, 'INFO', f'rqalpha output: {line.strip()}')
 
         process.wait()
 

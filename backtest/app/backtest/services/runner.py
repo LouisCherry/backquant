@@ -58,7 +58,7 @@ _DEFAULT_DEMO_STRATEGY_CODE = textwrap.dedent(
 _GOLDEN_CROSS_DEMO_STRATEGY_ID = "golden_cross_demo"
 _GOLDEN_CROSS_DEMO_STRATEGY_CODE = textwrap.dedent(
     """\
-    import talib
+    import numpy as np
     from rqalpha.api import *
 
 
@@ -87,9 +87,17 @@ _GOLDEN_CROSS_DEMO_STRATEGY_CODE = textwrap.dedent(
         # 读取历史数据，使用sma方式计算均线准确度和数据长度无关，但是在使用ema方式计算均线时建议将历史数据窗口适当放大，结果会更加准确
         prices = history_bars(context.s1, context.OBSERVATION,'1d','close')
 
-        # 用Talib计算MACD取值，得到三个时间序列数组，分别为macd, signal 和 hist
-        macd, signal, hist = talib.MACD(prices, context.SHORTPERIOD,
-                                        context.LONGPERIOD, context.SMOOTHPERIOD)
+        # 手动计算MACD
+        def ema(prices, period):
+            weights = np.exp(np.linspace(-1., 0., period))
+            weights /= weights.sum()
+            return np.convolve(prices, weights, mode='valid')
+        
+        ema12 = ema(prices, context.SHORTPERIOD)
+        ema26 = ema(prices, context.LONGPERIOD)
+        macd = ema12[-len(ema26):] - ema26
+        signal = ema(macd, context.SMOOTHPERIOD)
+        hist = macd[-len(signal):] - signal
 
         plot("macd", macd[-1])
         plot("macd signal", signal[-1])
@@ -229,11 +237,26 @@ _COMPILE_WORKER_SOURCE = textwrap.dedent(
 
         for module_name, (line, col) in import_sites.items():
             try:
+                # 尝试直接导入模块，这是最直接的检测方法
+                __import__(module_name)
+                # 导入成功，模块已安装
                 spec = importlib.util.find_spec(module_name)
+            except ImportError:
+                # 导入失败，尝试使用 find_spec
+                try:
+                    spec = importlib.util.find_spec(module_name)
+                except Exception as exc:
+                    ok = False
+                    diagnostics.append(_diag(line, col, "error", "dependency check failed for '{0}': {1}".format(module_name, exc)))
+                    continue
             except Exception as exc:
-                ok = False
-                diagnostics.append(_diag(line, col, "error", "dependency check failed for '{0}': {1}".format(module_name, exc)))
-                continue
+                # 其他错误，尝试使用 find_spec
+                try:
+                    spec = importlib.util.find_spec(module_name)
+                except Exception as exc2:
+                    ok = False
+                    diagnostics.append(_diag(line, col, "error", "dependency check failed for '{0}': {1}".format(module_name, exc2)))
+                    continue
             if spec is None:
                 ok = False
                 diagnostics.append(_diag(line, col, "error", "dependency '{0}' is not installed".format(module_name)))
@@ -1524,13 +1547,25 @@ def compile_strategy_debug(code: str, *, timeout_seconds: int = 10) -> tuple[dic
 
     payload = json.dumps({"code": code}, ensure_ascii=False)
     with tempfile.TemporaryDirectory(prefix="compile_", dir=str(sandbox_root)) as sandbox_dir:
+        # 保留系统的 PYTHONPATH，确保能找到已安装的包
+        # 明确添加用户站点包路径，解决 -I 选项导致的问题
+        python_path = os.environ.get("PYTHONPATH", "")
+        # 添加用户站点包路径
+        import site
+        user_site = site.getusersitepackages()
+        if user_site and user_site not in python_path:
+            if python_path:
+                python_path = f"{user_site}:{python_path}"
+            else:
+                python_path = user_site
+        
         env = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": sandbox_dir,
             "TMPDIR": sandbox_dir,
-            "PYTHONNOUSERSITE": "1",
+            "PYTHONNOUSERSITE": "0",  # 允许使用用户站点包
             "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": "",
+            "PYTHONPATH": python_path,
             "http_proxy": "",
             "https_proxy": "",
             "HTTP_PROXY": "",
@@ -1539,9 +1574,8 @@ def compile_strategy_debug(code: str, *, timeout_seconds: int = 10) -> tuple[dic
         }
         try:
             completed = subprocess.run(
-                # Keep isolation (-I) but allow site-packages so installed deps (for example rqalpha)
-                # can be discovered by importlib.util.find_spec during dependency checks.
-                [sys.executable, "-I", "-c", _COMPILE_WORKER_SOURCE],
+                # 移除 -I 选项，允许 Python 加载所有站点包
+                [sys.executable, "-c", _COMPILE_WORKER_SOURCE],
                 input=payload,
                 text=True,
                 capture_output=True,
@@ -1813,6 +1847,7 @@ def _build_research_config(
     symbol: str | None,
     bundle_path: Path,
     output_dir: Path,
+    data_source_type: str = 'hdf5',
 ) -> dict:
     result_pickle = (output_dir / "result.pkl").resolve()
     report_dir = (output_dir / "report").resolve()
@@ -1835,6 +1870,9 @@ def _build_research_config(
         "extra": {
             "log_level": "info",
             "log_file": str(log_path),
+            "context_vars": {
+                "data_source_type": data_source_type,
+            },
         },
         "mod": {
             "sys_analyser": {
@@ -1887,7 +1925,15 @@ def _create_file_logger(run_id: str, log_path: Path) -> tuple[logging.Logger, lo
     return run_logger, file_handler
 
 
-def _run_rqalpha_in_process(*, strategy_path: Path, config: dict, log_path: Path) -> None:
+def _run_rqalpha_in_process(*, strategy_path: Path, config: dict, log_path: Path, data_source_type: str = 'hdf5') -> None:
+    """在进程内运行 RQAlpha 回测
+    
+    Args:
+        strategy_path: 策略文件路径
+        config: RQAlpha 配置字典
+        log_path: 日志文件路径
+        data_source_type: 数据源类型，'hdf5' 或 'parquet'
+    """
     try:
         import rqalpha
     except Exception as exc:
@@ -1895,7 +1941,57 @@ def _run_rqalpha_in_process(*, strategy_path: Path, config: dict, log_path: Path
 
     with log_path.open("a", encoding="utf-8") as log_file, redirect_stdout(log_file), redirect_stderr(log_file):
         try:
-            rqalpha.run_file(str(strategy_path), config=config)
+            # 如果使用 Parquet 数据源，需要注入自定义数据源
+            if data_source_type == 'parquet':
+                # 对于 Parquet 数据源，我们需要修改 RQAlpha 的数据加载逻辑
+                # 这里采用一个简化的方法：使用 monkey patching
+                
+                from rqalpha.utils.config import parse_config
+                from rqalpha import main as rqalpha_main
+                from app.backtest.services.parquet_data_source import ParquetDataSource
+                
+                # 保存原始的 BaseDataSource
+                from rqalpha.data.base_data_source import BaseDataSource
+                original_base_data_source = BaseDataSource
+                
+                # 临时替换 BaseDataSource
+                import rqalpha.data.base_data_source as base_data_source_module
+                base_data_source_module.BaseDataSource = ParquetDataSource
+                
+                # 同时替换 rqalpha.data 模块中的 BaseDataSource
+                import rqalpha.data as data_module
+                if hasattr(data_module, 'BaseDataSource'):
+                    original_data_base_data_source = data_module.BaseDataSource
+                    data_module.BaseDataSource = ParquetDataSource
+                
+                # 最重要：替换 rqalpha.main 模块中的 BaseDataSource
+                # 这是关键！因为 main.run 函数直接使用了 BaseDataSource
+                if 'BaseDataSource' in rqalpha_main.__dict__:
+                    original_main_base_data_source = rqalpha_main.__dict__['BaseDataSource']
+                    print(f"[DEBUG] 找到 rqalpha.main.BaseDataSource: {original_main_base_data_source}")
+                else:
+                    original_main_base_data_source = None
+                    print(f"[DEBUG] 未找到 rqalpha.main.BaseDataSource")
+                
+                print(f"[DEBUG] 替换为 ParquetDataSource: {ParquetDataSource}")
+                rqalpha_main.__dict__['BaseDataSource'] = ParquetDataSource
+                
+                # 验证替换是否成功
+                print(f"[DEBUG] 替换后的 rqalpha.main.BaseDataSource: {rqalpha_main.__dict__.get('BaseDataSource')}")
+                
+                try:
+                    # 运行回测
+                    rqalpha.run_file(str(strategy_path), config=config)
+                finally:
+                    # 恢复原始的 BaseDataSource
+                    base_data_source_module.BaseDataSource = original_base_data_source
+                    if 'original_data_base_data_source' in locals():
+                        data_module.BaseDataSource = original_data_base_data_source
+                    if original_main_base_data_source is not None:
+                        rqalpha_main.__dict__['BaseDataSource'] = original_main_base_data_source
+            else:
+                # 使用默认的 HDF5 数据源
+                rqalpha.run_file(str(strategy_path), config=config)
         except SystemExit as exc:
             exit_code = exc.code if isinstance(exc.code, int) else 1
             raise RuntimeError(f"rqalpha exited unexpectedly with code {exit_code}") from exc
@@ -1950,6 +2046,10 @@ def run_backtest(params: dict) -> dict:
     log_path = output_dir / "backtest.log"
     run_logger, file_handler = _create_file_logger(run_id, log_path)
     run_logger.info("backtest run started: run_id=%s", run_id)
+    
+    # 获取数据源类型（从环境变量或参数）
+    data_source_type = params.get('data_source_type') or os.environ.get('MARKET_DATA_STORAGE_TYPE', 'hdf5')
+    run_logger.info("data source type: %s", data_source_type)
 
     try:
         config = _build_research_config(
@@ -1962,6 +2062,7 @@ def run_backtest(params: dict) -> dict:
             symbol=normalized["symbol"],
             bundle_path=normalized["bundle_path"],
             output_dir=output_dir,
+            data_source_type=data_source_type,
         )
         config_path = _write_research_config_yaml(config, output_dir)
 
@@ -1969,6 +2070,7 @@ def run_backtest(params: dict) -> dict:
             strategy_path=normalized["strategy_path"],
             config=config,
             log_path=log_path,
+            data_source_type=data_source_type,
         )
 
         result_pickle_path = output_dir / "result.pkl"

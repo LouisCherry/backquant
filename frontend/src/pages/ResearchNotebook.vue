@@ -123,28 +123,7 @@ function normalizeSession(payload) {
   };
 }
 
-function toAbsoluteUrl(rawUrl) {
-  let raw = String(rawUrl || '').trim();
-  if (!raw) {
-    return '';
-  }
 
-  try {
-    if (typeof window !== 'undefined' && window.location) {
-      const url = new URL(raw, window.location.origin);
-      if (/^(localhost|127\.0\.0\.1)$/i.test(url.hostname)) {
-        return new URL(`${url.pathname}${url.search}${url.hash}`, window.location.origin).toString();
-      }
-      if (/^(jupyter|backend)$/i.test(url.hostname)) {
-        return new URL(`${url.pathname}${url.search}${url.hash}`, window.location.origin).toString();
-      }
-      return url.toString();
-    }
-    return new URL(raw).toString();
-  } catch (error) {
-    return '';
-  }
-}
 
 export default {
   name: 'ResearchNotebook',
@@ -180,15 +159,8 @@ export default {
     researchId() {
       return DEFAULT_RESEARCH_ID;
     },
-    remoteNotebookUrl() {
-      return toAbsoluteUrl(
-        this.session?.embed_url
-          || this.session?.notebook_url
-          || ''
-      );
-    },
     notebookUrl() {
-      return this.remoteNotebookUrl;
+      return this.session?.embed_url || this.session?.notebook_url || '';
     },
     hasNotebookSession() {
       return Boolean(this.notebookUrl);

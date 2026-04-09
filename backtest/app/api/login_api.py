@@ -167,18 +167,35 @@ def api_login():
     username, password = _parse_login_form()
     if not username or not password:
         return _error_response(400, "INVALID_ARGUMENT", "username and password are required")
+    
+    # 先进行登录认证，获取token
+    auth_response = _db_login(username, password)
+    
+    # 然后检查bundle状态
     bundle_path = Path(current_app.config.get("RQALPHA_BUNDLE_PATH") or "").expanduser()
     if not bundle_path or not _bundle_is_ready(bundle_path):
         status_response = _bundle_status()
         status_payload = status_response.get_json(silent=True) if status_response else None
-        payload = {
-            "code": "BUNDLE_NOT_READY",
-            "message": "bundle is downloading",
-            "bundle_status": status_payload or {},
-        }
-        return jsonify(payload), 200
+        
+        # 如果认证成功，返回token和bundle状态
+        if auth_response[1] == 200:
+            auth_data = auth_response[0].get_json(silent=True) or {}
+            payload = {
+                "token": auth_data.get("token"),
+                "userid": auth_data.get("userid"),
+                "is_admin": auth_data.get("is_admin"),
+                "code": "BUNDLE_NOT_READY",
+                "message": "bundle is downloading",
+                "bundle_status": status_payload or {},
+            }
+            return jsonify(payload), 200
+        else:
+            # 认证失败，返回认证错误
+            return auth_response
+    
     try:
         ensure_bundle_analysis_task(bundle_path)
     except Exception:
         current_app.logger.exception("failed to auto-trigger bundle analysis after login")
-    return _db_login(username, password)
+    
+    return auth_response

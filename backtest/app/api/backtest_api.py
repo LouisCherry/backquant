@@ -721,7 +721,11 @@ def _run_job(app, job_id: str, job_dir: Path) -> None:
                 )
                 return
 
-            extract_result(result_pkl, job_dir / "extracted.json")
+            try:
+                extract_result(result_pkl, job_dir / "extracted.json")
+            except Exception as exc:
+                current_app.logger.warning("extract_result failed: %s", exc)
+                # 即使提取结果失败，回测本身已经完成，仍将状态设置为 FINISHED
             write_status(job_dir, "FINISHED")
         except TimeoutExpired:
             timeout = int(current_app.config.get("BACKTEST_TIMEOUT", 900))
@@ -829,7 +833,7 @@ def api_run_backtest():
     bind_run_fingerprint(run_fingerprint, job_id)
 
     app = current_app._get_current_object()
-    thread = threading.Thread(target=_run_job, args=(app, job_id, job_dir), daemon=True)
+    thread = threading.Thread(target=_run_job, args=(app, job_id, job_dir), daemon=False)
     thread.start()
 
     return jsonify({"job_id": job_id})
