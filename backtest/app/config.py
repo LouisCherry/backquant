@@ -91,11 +91,28 @@ class Config:
     DB_PASSWORD = _str_from_env("DB_PASSWORD", "")
     # VnPy futures bar data table
     DB_TABLE = _str_from_env("DB_TABLE", "dbbardata")
-    # Parquet data storage configuration
-    PARQUET_ROOT_DIR = _abs_path_from_env(
+    # ==================== 数据存储配置 ====================
+    # 数据源类型：'parquet' (推荐) 或 'hdf5' (旧版)
+    # 切换此项将影响回测引擎、数据同步和API接口的数据读取行为
+    DATA_SOURCE = _str_from_env("DATA_SOURCE", "parquet")
+    
+    # 数据源路径配置
+    # HDF5 数据目录
+    DATA_PATH_HDF5 = _abs_path_from_env(
+        "DATA_PATH_HDF5",
+        "data/hdf5",
+    )
+    # Parquet 数据目录
+    DATA_PATH_PARQUET = _abs_path_from_env(
         "PARQUET_ROOT_DIR",
         "data/parquet",
     )
+    
+    # 双重写入模式：迁移期间同时写入 Parquet 和 HDF5
+    # 设置为 True 时，数据同步脚本会同时写入两种格式
+    # 设置为 False 时，只写入 DATA_SOURCE 指定的格式
+    DUAL_WRITE_ENABLED = _bool_from_env("DUAL_WRITE_ENABLED", True)
+    
     # Default storage type for market data: 'parquet' or 'db'
     MARKET_DATA_STORAGE_TYPE = _str_from_env("MARKET_DATA_STORAGE_TYPE", "parquet")
     # Research workbench storage and notebook session settings.

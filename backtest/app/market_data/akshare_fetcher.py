@@ -477,16 +477,12 @@ def save_1min_data_to_parquet(
     if not data:
         return 0, Path('')
     
-    if parquet_root is None:
-        parquet_root = _get_parquet_root()
+    # 使用数据写入器工厂
+    from app.market_data.data_writer import get_data_writer
+    writer = get_data_writer()
     
     # 提取股票代码（去掉交易所后缀）
     code = symbol.split('.')[0] if '.' in symbol else symbol
-    
-    # 构建文件路径：{root_dir}/1m/{code}.parquet
-    parquet_dir = parquet_root / '1m'
-    parquet_dir.mkdir(parents=True, exist_ok=True)
-    parquet_path = parquet_dir / f'{code}.parquet'
     
     try:
         # 转换为 DataFrame
@@ -497,34 +493,34 @@ def save_1min_data_to_parquet(
             df_new['datetime'] = df_new['datetime'].astype(str)
         
         # 如果文件已存在，读取并合并
-        if parquet_path.exists():
-            try:
-                df_existing = pd.read_parquet(parquet_path)
+        try:
+            existing_df = writer.read_minute_data(code, '1m')
+            if existing_df is not None and not existing_df.empty:
                 # 合并数据
-                df_combined = pd.concat([df_existing, df_new], ignore_index=True)
+                df_combined = pd.concat([existing_df, df_new], ignore_index=True)
                 # 去重（按 datetime 列）
                 df_combined = df_combined.drop_duplicates(subset=['datetime'], keep='last')
                 # 按时间排序
                 df_combined = df_combined.sort_values('datetime').reset_index(drop=True)
                 df_to_save = df_combined
-            except Exception as e:
-                logger.warning(f"读取已有 Parquet 文件失败，将覆盖: {e}")
+            else:
                 df_to_save = df_new
-        else:
+        except Exception as e:
+            logger.warning(f"读取已有数据失败（可能不存在），将保存新数据: {e}")
             df_to_save = df_new
         
-        # 保存为 Parquet 文件
-        df_to_save.to_parquet(
-            parquet_path, 
-            index=False, 
-            compression='snappy'
-        )
-        
-        count = len(df_to_save)
-        logger.info(f"成功存储 {len(data)} 条新数据到 Parquet 文件: {parquet_path}")
-        logger.info(f"文件总记录数: {count}")
-        
-        return count, parquet_path
+        # 使用数据写入器保存
+        if writer.write_minute_data(df_to_save, code, '1m'):
+            count = len(df_to_save)
+            logger.info(f"成功存储 {len(data)} 条新数据到 Parquet 文件")
+            logger.info(f"文件总记录数: {count}")
+            
+            # 返回路径（从配置获取）
+            from app.utils.path_manager import path_manager
+            parquet_path = path_manager.get_parquet_path(code, frequency='1m')
+            return count, parquet_path
+        else:
+            return 0, Path('')
     except Exception as e:
         logger.error(f"保存数据到 Parquet 失败: {e}")
         return 0, Path('')

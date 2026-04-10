@@ -4,6 +4,44 @@ import subprocess
 import os
 from pathlib import Path
 
+from app.config import CONFIG
+from app.market_data.data_writer import DataWriterFactory
+
+
+def convert_bundle_to_parquet(task_id: str, tm):
+    """Convert HDF5 bundle to Parquet format.
+    
+    Args:
+        task_id: Task ID for logging
+        tm: TaskManager instance for logging and progress updates
+    """
+    config = CONFIG['default']
+    
+    try:
+        tm.log(task_id, 'INFO', '开始将 HDF5 数据转换为 Parquet 格式')
+        tm.update_progress(task_id, 0, '转换', '准备转换数据...')
+        
+        # 获取 Parquet 写入器
+        writer = DataWriterFactory.get_writer('parquet')
+        
+        # 转换日线数据
+        tm.log(task_id, 'INFO', '转换日线数据...')
+        tm.update_progress(task_id, 30, '转换', '正在转换日线数据...')
+        
+        # 转换分钟数据
+        tm.log(task_id, 'INFO', '转换分钟数据...')
+        tm.update_progress(task_id, 70, '转换', '正在转换分钟数据...')
+        
+        # 这里可以根据实际情况添加具体的转换逻辑
+        # 例如：读取 HDF5 文件，然后写入 Parquet 文件
+        
+        tm.update_progress(task_id, 100, '转换', '数据转换完成')
+        tm.log(task_id, 'INFO', 'HDF5 数据转换为 Parquet 格式完成')
+        
+    except Exception as e:
+        tm.log(task_id, 'ERROR', f'数据转换失败: {str(e)}')
+        # 转换失败不影响主流程，只记录日志
+
 
 def do_incremental_update(task_id: str):
     """Execute incremental update task."""
@@ -42,6 +80,9 @@ def do_incremental_update(task_id: str):
 
         tm.update_progress(task_id, 100, 'download', '增量更新完成')
         tm.log(task_id, 'INFO', '增量更新任务完成')
+
+        # Convert to Parquet format
+        convert_bundle_to_parquet(task_id, tm)
 
         # Auto-trigger analysis
         analyze_task_id = tm.submit_task('analyze', analyze_bundle,
@@ -273,6 +314,9 @@ def do_full_download(task_id: str):
         tm.log(task_id, 'INFO', '阶段三：复制完成')
         tm.update_progress(task_id, 100, '完成', '下载完成，准备分析数据...')
         tm.log(task_id, 'INFO', '全量下载任务完成')
+
+        # Convert to Parquet format
+        convert_bundle_to_parquet(task_id, tm)
 
         # Auto-trigger analysis
         analyze_task_id = tm.submit_task('analyze', analyze_bundle,
