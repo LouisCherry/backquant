@@ -123,6 +123,64 @@
               </div>
             </div>
           </div>
+
+          <!-- 数据质量报告 -->
+          <div class="inspection-section">
+            <div class="panel-header">
+              <h3>数据质量报告</h3>
+              <button @click="loadInspection" class="btn btn-secondary btn-mini" :disabled="inspectionLoading">
+                {{ inspectionLoading ? '加载中...' : '刷新报告' }}
+              </button>
+            </div>
+            <div v-if="inspectionLoading" class="loading-state">
+              <p>加载数据质量报告中...</p>
+            </div>
+            <div v-else-if="inspectionError" class="error-state">
+              <div class="inline-error">{{ inspectionError }}</div>
+              <button @click="loadInspection" class="btn btn-secondary">重试</button>
+            </div>
+            <div v-else-if="inspectionData" class="inspection-content">
+              <div class="inspection-stats">
+                <div class="stat-item">
+                  <div class="stat-label">总股票数</div>
+                  <div class="stat-value">{{ formatNumber(inspectionData.stats.total_stocks) }}</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">总记录数</div>
+                  <div class="stat-value">{{ formatNumber(inspectionData.stats.total_records) }}</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-label">数据频率</div>
+                  <div class="stat-value">{{ Object.keys(inspectionData.stats.frequencies).join(', ') }}</div>
+                </div>
+              </div>
+              
+              <div class="inspection-charts">
+                <div class="chart-item">
+                  <h4 class="section-title">数据完整性矩阵</h4>
+                  <div class="chart-container">
+                    <img :src="'data:image/png;base64,' + inspectionData.visualizations.completeness_matrix" alt="数据完整性矩阵">
+                  </div>
+                </div>
+                <div class="chart-item">
+                  <h4 class="section-title">数据量分布直方图</h4>
+                  <div class="chart-container">
+                    <img :src="'data:image/png;base64,' + inspectionData.visualizations.distribution_histogram" alt="数据量分布直方图">
+                  </div>
+                </div>
+                <div class="chart-item">
+                  <h4 class="section-title">更新时效性散点图</h4>
+                  <div class="chart-container">
+                    <img :src="'data:image/png;base64,' + inspectionData.visualizations.timeliness_scatter" alt="更新时效性散点图">
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div v-else class="empty-state">
+              <p>暂无数据质量报告</p>
+              <button @click="loadInspection" class="btn btn-secondary">生成报告</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -147,7 +205,10 @@ export default {
       files: [],
       analyzing: false,
       currentTaskId: null,
-      autoTriggered: false
+      autoTriggered: false,
+      inspectionLoading: false,
+      inspectionError: null,
+      inspectionData: null
     };
   },
   mounted() {
@@ -246,6 +307,30 @@ export default {
       this.currentTaskId = null;
       if (task.status === 'success') {
         this.loadOverview();
+      }
+    },
+    async loadInspection() {
+      this.inspectionLoading = true;
+      this.inspectionError = null;
+
+      try {
+        const response = await fetch('/api/market-data/inspection', {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          }
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          this.inspectionData = result;
+        } else {
+          const errorData = await response.json();
+          this.inspectionError = errorData.error || '加载数据质量报告失败';
+        }
+      } catch (err) {
+        this.inspectionError = '网络错误，请重试';
+      } finally {
+        this.inspectionLoading = false;
       }
     },
     renderChart() {
@@ -714,5 +799,59 @@ export default {
 .btn-mini {
   padding: 4px 8px;
   font-size: 12px;
+}
+
+/* 数据质量报告样式 */
+.inspection-section {
+  margin-top: 24px;
+  border-top: 1px solid #e0e0e0;
+  padding-top: 16px;
+}
+
+.inspection-section .panel-header {
+  margin-bottom: 16px;
+}
+
+.inspection-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.inspection-charts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.chart-item {
+  flex: 1 1 300px;
+  min-width: 300px;
+  padding: 16px;
+  background: #fafafa;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+
+.chart-item .chart-container {
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 4px;
+}
+
+.chart-item img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.inspection-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 </style>

@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS market_data_cron_config (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS market_data_cron_config_5min (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled BOOLEAN DEFAULT FALSE,
+    cron_expression VARCHAR(100),
+    task_type VARCHAR(50),
+    script_path VARCHAR(500),
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS market_data_cron_logs (
     log_id INTEGER PRIMARY KEY AUTO_INCREMENT,
     task_id VARCHAR(128),
@@ -138,6 +147,11 @@ CREATE TABLE IF NOT EXISTS research_items (
 -- 选3号而非1号，因为每月1号米筐通常还未发布当月数据包
 INSERT INTO market_data_cron_config (id, enabled, cron_expression, task_type, updated_at)
 VALUES (1, TRUE, '0 4 3 * *', 'full', CURRENT_TIMESTAMP)
+ON DUPLICATE KEY UPDATE id=id;
+
+-- Insert default 5min cron config (enabled by default, runs every 5 minutes)
+INSERT INTO market_data_cron_config_5min (id, enabled, cron_expression, task_type, script_path, updated_at)
+VALUES (1, TRUE, '*/5 * * * *', '5min', '/Users/panshunxing/eclipse-workspace/BackQuant/backquant/backtest/scripts/fetch_all_stocks_5min.py', CURRENT_TIMESTAMP)
 ON DUPLICATE KEY UPDATE id=id;
 
 -- Note: User initialization is handled by the application

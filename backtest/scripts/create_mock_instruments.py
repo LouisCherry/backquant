@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 import pandas as pd
 
+# 添加项目根目录到 Python 路径
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from app.utils.parquet_utils import read_parquet_safe, write_parquet_safe
+
 
 def create_mock_instruments():
     """创建模拟的股票基础信息
@@ -77,11 +81,13 @@ def save_to_parquet(df, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     # 保存为 Parquet
-    df.to_parquet(output_path, index=False, compression='snappy')
-    
-    print(f"保存成功: {output_path}")
-    print(f"文件大小: {output_path.stat().st_size} bytes")
-    print(f"记录数: {len(df)}")
+    if write_parquet_safe(df, output_path, index=False, compression='snappy'):
+        print(f"保存成功: {output_path}")
+        print(f"文件大小: {output_path.stat().st_size} bytes")
+        print(f"记录数: {len(df)}")
+    else:
+        print(f"保存失败: {output_path}")
+        raise Exception("保存 Parquet 文件失败")
 
 
 def verify_parquet(parquet_path):
@@ -95,7 +101,10 @@ def verify_parquet(parquet_path):
     print("=" * 60)
     
     # 读取 Parquet 文件
-    df = pd.read_parquet(parquet_path)
+    df = read_parquet_safe(parquet_path)
+    if df is None:
+        print(f"读取失败: {parquet_path}")
+        raise Exception("读取 Parquet 文件失败")
     
     print(f"读取成功，共 {len(df)} 条记录")
     print(f"\n列名: {list(df.columns)}")

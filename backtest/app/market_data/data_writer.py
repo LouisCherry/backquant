@@ -12,6 +12,7 @@ import pandas as pd
 
 from app.config import CONFIG
 from app.utils.path_manager import path_manager
+from app.utils.parquet_utils import read_parquet_safe, write_parquet_safe
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +88,14 @@ class ParquetWriter(DataWriter):
         try:
             code = symbol.split('.')[0] if '.' in symbol else symbol
             parquet_path = path_manager.get_parquet_path(code, frequency='1d')
-            parquet_path.parent.mkdir(parents=True, exist_ok=True)
             
-            df.to_parquet(parquet_path, index=False, compression='snappy')
-            logger.debug(f"成功写入 Parquet 日线数据: {symbol}")
-            return True
+            success = write_parquet_safe(df, parquet_path, index=False, compression='snappy')
+            if success:
+                logger.debug(f"成功写入 Parquet 日线数据: {symbol}")
+                return True
+            else:
+                logger.error(f"写入 Parquet 日线数据失败 {symbol}")
+                return False
         except Exception as e:
             logger.error(f"写入 Parquet 日线数据失败 {symbol}: {e}")
             return False
@@ -101,11 +105,14 @@ class ParquetWriter(DataWriter):
         try:
             code = symbol.split('.')[0] if '.' in symbol else symbol
             parquet_path = path_manager.get_parquet_path(code, frequency=frequency)
-            parquet_path.parent.mkdir(parents=True, exist_ok=True)
             
-            df.to_parquet(parquet_path, index=False, compression='snappy')
-            logger.debug(f"成功写入 Parquet 分钟数据: {symbol} ({frequency})")
-            return True
+            success = write_parquet_safe(df, parquet_path, index=False, compression='snappy')
+            if success:
+                logger.debug(f"成功写入 Parquet 分钟数据: {symbol} ({frequency})")
+                return True
+            else:
+                logger.error(f"写入 Parquet 分钟数据失败 {symbol} ({frequency})")
+                return False
         except Exception as e:
             logger.error(f"写入 Parquet 分钟数据失败 {symbol}: {e}")
             return False
@@ -117,7 +124,7 @@ class ParquetWriter(DataWriter):
             parquet_path = path_manager.get_parquet_path(code, frequency='1d')
             
             if parquet_path.exists():
-                return pd.read_parquet(parquet_path)
+                return read_parquet_safe(parquet_path)
             return None
         except Exception as e:
             logger.warning(f"读取 Parquet 日线数据失败 {symbol}: {e}")
@@ -130,7 +137,7 @@ class ParquetWriter(DataWriter):
             parquet_path = path_manager.get_parquet_path(code, frequency=frequency)
             
             if parquet_path.exists():
-                return pd.read_parquet(parquet_path)
+                return read_parquet_safe(parquet_path)
             return None
         except Exception as e:
             logger.warning(f"读取 Parquet 分钟数据失败 {symbol}: {e}")

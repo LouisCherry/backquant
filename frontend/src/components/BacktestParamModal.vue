@@ -35,6 +35,8 @@
             <select v-model="form.frequency" class="text-input">
               <option value="1d">日频（1d）</option>
               <option value="1m">分钟（1m）</option>
+              <option value="5m">5分钟（5m）</option>
+              <option value="tick">Tick（tick）</option>
             </select>
           </div>
         </div>

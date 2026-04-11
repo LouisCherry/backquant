@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from app.database import DatabaseConnection, DatabaseConfig, get_db_connection
+from app.utils.parquet_utils import read_parquet_safe, write_parquet_safe
 
 logger = logging.getLogger(__name__)
 
@@ -398,9 +399,9 @@ def get_last_datetime_in_parquet(symbol: str, parquet_root: Optional[Path] = Non
     
     try:
         # 读取 Parquet 文件
-        df = pd.read_parquet(parquet_path)
+        df = read_parquet_safe(parquet_path)
         
-        if df.empty or 'datetime' not in df.columns:
+        if df is None or df.empty or 'datetime' not in df.columns:
             return None
         
         # 获取最新的时间
@@ -488,9 +489,9 @@ def save_1min_data_to_parquet(
         # 转换为 DataFrame
         df_new = pd.DataFrame(data)
         
-        # 确保 datetime 列是字符串格式（Parquet 兼容）
+        # 确保 datetime 列是正确的日期时间类型
         if 'datetime' in df_new.columns:
-            df_new['datetime'] = df_new['datetime'].astype(str)
+            df_new['datetime'] = pd.to_datetime(df_new['datetime'])
         
         # 如果文件已存在，读取并合并
         try:
@@ -498,6 +499,9 @@ def save_1min_data_to_parquet(
             if existing_df is not None and not existing_df.empty:
                 # 合并数据
                 df_combined = pd.concat([existing_df, df_new], ignore_index=True)
+                # 确保 datetime 列是正确的日期时间类型
+                if 'datetime' in df_combined.columns:
+                    df_combined['datetime'] = pd.to_datetime(df_combined['datetime'])
                 # 去重（按 datetime 列）
                 df_combined = df_combined.drop_duplicates(subset=['datetime'], keep='last')
                 # 按时间排序

@@ -79,7 +79,7 @@ class Config:
     BACKTEST_COMPILE_TIMEOUT = _int_from_env("BACKTEST_COMPILE_TIMEOUT", 10)
     BACKTEST_KEEP_DAYS = _int_from_env("BACKTEST_KEEP_DAYS", 30)
     BACKTEST_IDEMPOTENCY_WINDOW_SECONDS = _int_from_env("BACKTEST_IDEMPOTENCY_WINDOW_SECONDS", 30)
-    BACKTEST_ALLOWED_FREQUENCIES = _list_from_env("BACKTEST_ALLOWED_FREQUENCIES", ("1d", "1m", "tick"))
+    BACKTEST_ALLOWED_FREQUENCIES = _list_from_env("BACKTEST_ALLOWED_FREQUENCIES", ("1d", "1m", "5m", "tick"))
     # Market data database path (default: <BACKTEST_BASE_DIR>/market_data.sqlite3).
     MARKET_DATA_DB_PATH = _str_from_env("MARKET_DATA_DB_PATH", "")
     # Database configuration (SQLite or MariaDB)

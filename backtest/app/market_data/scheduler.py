@@ -4,6 +4,8 @@ from apscheduler.triggers.cron import CronTrigger
 from pathlib import Path
 from datetime import datetime
 import logging
+import subprocess
+import sys
 
 from app.database import DatabaseConfig, get_db_connection
 
@@ -34,8 +36,14 @@ def load_cron_config() -> dict:
         return db.fetchone("SELECT * FROM market_data_cron_config WHERE id = 1")
 
 
+def load_cron_config_5min() -> dict:
+    """Load 5min cron configuration from database."""
+    with get_db_connection(config_dict=_db_config_dict) as db:
+        return db.fetchone("SELECT * FROM market_data_cron_config_5min WHERE id = 1")
+
+
 def cron_job_handler():
-    """Cron job handler."""
+    """Cron job handler for full/incremental download."""
     from app.market_data.task_manager import get_task_manager
     from app.market_data.tasks import do_full_download, do_incremental_update
 
@@ -72,8 +80,67 @@ def cron_job_handler():
         _log_cron_run(None, 'failed', str(e))
 
 
+def cron_job_handler_5min():
+    """Cron job handler for 5min data download."""
+    config = load_cron_config_5min()
+
+    if not config or not config['enabled']:
+        logger.info('5min cron job disabled, skipping')
+        _log_cron_run_5min(None, 'skipped', '定时任务未启用')
+        return
+
+    script_path = config.get('script_path')
+    if not script_path:
+        logger.error('5min cron job: script path not configured')
+        _log_cron_run_5min(None, 'failed', '脚本路径未配置')
+        return
+
+    script_path_obj = Path(script_path)
+    if not script_path_obj.exists():
+        logger.error(f'5min cron job: script not found at {script_path}')
+        _log_cron_run_5min(None, 'failed', f'脚本不存在: {script_path}')
+        return
+
+    logger.info(f'5min cron job triggered, executing script: {script_path}')
+
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            capture_output=True,
+            text=True,
+            timeout=3600
+        )
+
+        if result.returncode == 0:
+            logger.info(f'5min cron job completed successfully')
+            _log_cron_run_5min(None, 'success', '脚本执行成功')
+        else:
+            logger.error(f'5min cron job failed with return code {result.returncode}')
+            logger.error(f'Stdout: {result.stdout}')
+            logger.error(f'Stderr: {result.stderr}')
+            _log_cron_run_5min(None, 'failed', f'脚本执行失败，退出码: {result.returncode}')
+
+    except subprocess.TimeoutExpired:
+        logger.error('5min cron job timed out')
+        _log_cron_run_5min(None, 'failed', '脚本执行超时')
+    except Exception as e:
+        logger.error(f'5min cron job failed: {str(e)}')
+        _log_cron_run_5min(None, 'failed', str(e))
+
+
 def _log_cron_run(task_id, status: str, message: str):
-    """Log cron run."""
+    """Log cron run for full/incremental tasks."""
+    with get_db_connection(config_dict=_db_config_dict) as db:
+        db.execute(
+            """INSERT INTO market_data_cron_logs
+               (task_id, trigger_time, status, message)
+               VALUES (?, ?, ?, ?)""",
+            (task_id, datetime.utcnow().isoformat(), status, message)
+        )
+
+
+def _log_cron_run_5min(task_id, status: str, message: str):
+    """Log cron run for 5min tasks."""
     with get_db_connection(config_dict=_db_config_dict) as db:
         db.execute(
             """INSERT INTO market_data_cron_logs
@@ -84,11 +151,14 @@ def _log_cron_run(task_id, status: str, message: str):
 
 
 def update_cron_schedule(cron_expression: str):
-    """Update cron schedule."""
+    """Update cron schedule for full/incremental download."""
     scheduler = get_scheduler()
 
-    # Remove old jobs
-    scheduler.remove_all_jobs()
+    # Remove old job if exists
+    try:
+        scheduler.remove_job('market_data_cron', jobstore=None)
+    except Exception:
+        pass
 
     # Add new job
     if cron_expression:
@@ -100,6 +170,28 @@ def update_cron_schedule(cron_expression: str):
             replace_existing=True
         )
         logger.info(f'Cron schedule updated: {cron_expression}')
+
+
+def update_5min_cron_schedule(cron_expression: str, script_path: str = None):
+    """Update cron schedule for 5min data download."""
+    scheduler = get_scheduler()
+
+    # Remove old job if exists
+    try:
+        scheduler.remove_job('market_data_cron_5min', jobstore=None)
+    except Exception:
+        pass
+
+    # Add new job
+    if cron_expression:
+        trigger = CronTrigger.from_crontab(cron_expression)
+        scheduler.add_job(
+            cron_job_handler_5min,
+            trigger=trigger,
+            id='market_data_cron_5min',
+            replace_existing=True
+        )
+        logger.info(f'5min Cron schedule updated: {cron_expression}')
 
 
 def init_scheduler():
@@ -119,3 +211,9 @@ def init_scheduler():
     if cron_config and cron_config['enabled'] and cron_config['cron_expression']:
         update_cron_schedule(cron_config['cron_expression'])
         logger.info(f'Cron schedule loaded: {cron_config["cron_expression"]}')
+
+    cron_config_5min = load_cron_config_5min()
+
+    if cron_config_5min and cron_config_5min['enabled'] and cron_config_5min['cron_expression']:
+        update_5min_cron_schedule(cron_config_5min['cron_expression'], cron_config_5min.get('script_path'))
+        logger.info(f'5min Cron schedule loaded: {cron_config_5min["cron_expression"]}')

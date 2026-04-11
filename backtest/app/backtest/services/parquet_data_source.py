@@ -19,7 +19,30 @@ from rqalpha.const import INSTRUMENT_TYPE, MARKET
 from rqalpha.model.instrument import Instrument
 from rqalpha.utils.datetime_func import convert_date_to_int
 
-from app.database import get_db_connection
+# 尝试导入数据库连接，如果失败则设置为None
+try:
+    from app.database import get_db_connection
+except ImportError:
+    get_db_connection = None
+    logging.warning("无法导入 app.database，将使用备用方案初始化合约信息")
+
+# Add project root to path
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+# 尝试导入parquet_utils，如果失败则使用本地实现
+try:
+    from app.utils.parquet_utils import read_parquet_safe
+except ImportError:
+    logging.warning("无法导入 app.utils.parquet_utils，将使用本地实现的 read_parquet_safe")
+    
+    def read_parquet_safe(path):
+        """安全读取 Parquet 文件"""
+        try:
+            return pd.read_parquet(path)
+        except Exception as e:
+            logging.warning(f"读取 Parquet 文件失败: {e}")
+            return None
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +71,20 @@ class ParquetDataSource(BaseDataSource):
     
     def _init_parquet_data_source(self, base_config):
         """初始化 Parquet 数据源（不加载 HDF5 bundle）"""
-        # 获取配置
+        # 获取配置：优先使用环境变量，然后使用配置文件中的路径
+        from app.config import CONFIG
+        default_parquet_path = CONFIG['default'].DATA_PATH_PARQUET
+        
         self._parquet_root = Path(os.environ.get(
             'PARQUET_ROOT_DIR',
-            base_config.data_bundle_path
+            default_parquet_path
         ))
         
         if not self._parquet_root.exists():
             raise RuntimeError(f'Parquet root path {self._parquet_root} does not exist')
         
         logger.info(f"初始化 Parquet 数据源: {self._parquet_root}")
+        logger.info(f"数据来源: {'环境变量 PARQUET_ROOT_DIR' if 'PARQUET_ROOT_DIR' in os.environ else '配置文件 DATA_PATH_PARQUET'}")
         
         # 数据缓存：{order_book_id: DataFrame}
         self._data_cache: Dict[str, pd.DataFrame] = {}
@@ -122,7 +149,10 @@ class ParquetDataSource(BaseDataSource):
         logger.info(f"加载合约信息文件: {instruments_path}")
         
         # 读取 Parquet 文件
-        df = pd.read_parquet(instruments_path)
+        df = read_parquet_safe(instruments_path)
+        if df is None:
+            logger.error(f"无法读取合约信息文件: {instruments_path}")
+            return
         logger.info(f"读取到 {len(df)} 条合约记录")
         
         # 转换为 Instrument 对象
@@ -207,9 +237,9 @@ class ParquetDataSource(BaseDataSource):
             # 读取一个股票的数据来推断交易日
             sample_file = self._parquet_root / '1m' / '000001.parquet'
             if sample_file.exists():
-                df = pd.read_parquet(sample_file)
-                if 'datetime' in df.columns:
-                    dates = pd.to_datetime(df['datetime']).dt.date.unique()
+                df = read_parquet_safe(sample_file)
+                if df is not None and 'datetime' in df.columns:
+                    dates = df['datetime'].dt.date.unique()
                     self._trading_dates = pd.DatetimeIndex(dates)
                     logger.info(f"从样本文件推断交易日历: {len(self._trading_dates)} 个交易日")
         except Exception as e:
@@ -244,12 +274,12 @@ class ParquetDataSource(BaseDataSource):
         code = order_book_id.split('.')[0] if '.' in order_book_id else order_book_id
         
         # 构建文件路径
-        # 对于日线数据，如果没有日线文件，则从 1 分钟数据聚合
+        # 对于日线数据，如果没有日线文件，则从分钟数据聚合
         if frequency == '1d':
             parquet_path = self._parquet_root / '1d' / f'{code}.parquet'
             if not parquet_path.exists():
-                # 从 1 分钟数据聚合日线
-                logger.info(f"日线数据不存在，从 1 分钟数据聚合: {order_book_id}")
+                # 优先从 1 分钟数据聚合日线
+                logger.info(f"日线数据不存在，尝试从 1 分钟数据聚合: {order_book_id}")
                 df_1m = self._load_parquet_data(order_book_id, '1m', columns=None)  # 聚合需要所有列
                 if df_1m is not None:
                     df = self._aggregate_to_daily(df_1m)
@@ -263,6 +293,24 @@ class ParquetDataSource(BaseDataSource):
                         # 缓存日线数据
                         self._data_cache[cache_key] = df
                         return df
+                
+                # 如果 1m 数据也不存在，尝试从 5m 数据聚合
+                logger.info(f"1分钟数据也不存在，尝试从 5 分钟数据聚合: {order_book_id}")
+                df_5m = self._load_parquet_data(order_book_id, '5m', columns=None)
+                if df_5m is not None:
+                    df = self._aggregate_to_daily(df_5m)
+                    if df is not None:
+                        # 如果只需要部分列，进行筛选
+                        if columns:
+                            available_columns = [col for col in columns if col in df.columns]
+                            if available_columns:
+                                df = df[available_columns]
+                        
+                        # 缓存日线数据
+                        self._data_cache[cache_key] = df
+                        return df
+                
+                logger.warning(f"无法获取 {order_book_id} 的日线数据（1d、1m、5m 数据均不存在）")
                 return None
         else:
             parquet_path = self._parquet_root / frequency / f'{code}.parquet'
@@ -274,7 +322,10 @@ class ParquetDataSource(BaseDataSource):
         try:
             # 读取 Parquet 文件
             # 注意：由于列名在文件中可能未标准化，我们需要先读取所有列，然后筛选
-            df = pd.read_parquet(parquet_path)
+            df = read_parquet_safe(parquet_path)
+            if df is None:
+                logger.error(f"无法读取 Parquet 文件: {parquet_path}")
+                return None
             
             # 标准化列名
             df = self._normalize_columns(df)
@@ -288,7 +339,6 @@ class ParquetDataSource(BaseDataSource):
             
             # 确保 datetime 列是 datetime 类型
             if 'datetime' in df.columns:
-                df['datetime'] = pd.to_datetime(df['datetime'])
                 df = df.sort_values('datetime').reset_index(drop=True)
             
             # 缓存数据
@@ -549,6 +599,7 @@ class ParquetDataSource(BaseDataSource):
             (开始日期, 结束日期)
         """
         logger.info(f"available_data_range 被调用，frequency={frequency}")
+        logger.info(f"Parquet 根目录: {self._parquet_root}")
         
         # 如果有交易日历，返回第一个和最后一个交易日
         if self._trading_dates is not None and len(self._trading_dates) > 0:
@@ -561,17 +612,30 @@ class ParquetDataSource(BaseDataSource):
         try:
             # 尝试从第一个可用的 Parquet 文件获取时间范围
             parquet_dir = self._parquet_root / frequency
+            logger.info(f"检查 Parquet 目录: {parquet_dir}")
+            logger.info(f"目录存在: {parquet_dir.exists()}")
+            
             if parquet_dir.exists():
                 parquet_files = list(parquet_dir.glob('*.parquet'))
+                logger.info(f"找到 {len(parquet_files)} 个 Parquet 文件")
+                
                 if parquet_files:
                     # 使用第一个文件推断时间范围
                     sample_file = parquet_files[0]
+                    logger.info(f"使用样本文件: {sample_file}")
+                    
                     start_date, end_date = self._get_parquet_time_range(sample_file)
+                    logger.info(f"_get_parquet_time_range 返回: start_date={start_date}, end_date={end_date}")
+                    
                     if start_date and end_date:
                         logger.info(f"从 Parquet 文件推断时间范围: {start_date} ~ {end_date}")
                         return start_date, end_date
+                    else:
+                        logger.warning("_get_parquet_time_range 返回了 None 值")
+            else:
+                logger.warning(f"Parquet 目录不存在: {parquet_dir}")
         except Exception as e:
-            logger.warning(f"从 Parquet 文件推断时间范围失败: {e}")
+            logger.warning(f"从 Parquet 文件推断时间范围失败: {e}", exc_info=True)
         
         # 返回默认范围
         from datetime import date as date_type
@@ -593,13 +657,10 @@ class ParquetDataSource(BaseDataSource):
         """
         try:
             # 方法1: 尝试只读取 datetime 列（最快的元数据读取方式）
-            df = pd.read_parquet(parquet_path, columns=['datetime'])
+            df = read_parquet_safe(parquet_path)
             
-            if df.empty or 'datetime' not in df.columns:
+            if df is None or df.empty or 'datetime' not in df.columns:
                 return None, None
-            
-            # 转换为 datetime 类型
-            df['datetime'] = pd.to_datetime(df['datetime'])
             
             # 获取最小和最大日期
             min_datetime = df['datetime'].min()

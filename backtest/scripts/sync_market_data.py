@@ -47,7 +47,50 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.gridspec import GridSpec
+from matplotlib.font_manager import FontProperties
 import random
+import platform
+
+
+def setup_chinese_font():
+    """配置中文字体"""
+    system = platform.system()
+    
+    if system == 'Darwin':  # macOS
+        font_path = '/System/Library/Fonts/PingFang.ttc'
+        if os.path.exists(font_path):
+            plt.rcParams['font.sans-serif'] = ['PingFang SC', 'Arial Unicode MS']
+            return
+    
+    if system == 'Linux':
+        font_paths = [
+            '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf'
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                from matplotlib.font_manager import FontProperties
+                font_prop = FontProperties(fname=fp)
+                plt.rcParams['font.family'] = font_prop.get_name()
+                return
+    
+    if system == 'Windows':
+        font_path = 'C:/Windows/Fonts/simhei.ttf'
+        if os.path.exists(font_path):
+            from matplotlib.font_manager import FontProperties
+            font_prop = FontProperties(fname=font_path)
+            plt.rcParams['font.family'] = font_prop.get_name()
+            return
+    
+    # 如果找不到合适的中文字体，使用通用设置
+    plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
+    
+    # 解决负号显示问题
+    plt.rcParams['axes.unicode_minus'] = False
+
+
+setup_chinese_font()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -57,6 +100,7 @@ from app.market_data.baostock_fetcher import (
     _get_parquet_root
 )
 from app.market_data.akshare_fetcher import get_last_datetime_in_parquet
+from app.utils.parquet_utils import read_parquet_safe, write_parquet_safe
 from app.market_data.data_writer import DataWriterFactory, get_data_writer
 from app.config import CONFIG
 
@@ -452,9 +496,8 @@ def show_stats():
             if parquet_files:
                 sample_file = parquet_files[0]
                 try:
-                    df = pd.read_parquet(sample_file)
-                    if 'datetime' in df.columns:
-                        df['datetime'] = pd.to_datetime(df['datetime'])
+                    df = read_parquet_safe(sample_file)
+                    if df is not None and 'datetime' in df.columns:
                         min_dt = df['datetime'].min()
                         max_dt = df['datetime'].max()
                         logger.info(f"  时间范围: {min_dt.date()} ~ {max_dt.date()}")
@@ -510,27 +553,24 @@ def scan_parquet_data(frequency: Optional[str] = None) -> Dict:
         
         for parquet_file in parquet_files:
             try:
-                df = pd.read_parquet(parquet_file)
-                if 'datetime' not in df.columns:
-                    continue
-                
-                df['datetime'] = pd.to_datetime(df['datetime'])
-                stock_code = parquet_file.stem
-                
-                stock_info = {
-                    'code': stock_code,
-                    'record_count': len(df),
-                    'min_date': df['datetime'].min(),
-                    'max_date': df['datetime'].max()
-                }
-                
-                freq_stats['stocks'].append(stock_info)
-                freq_stats['total_records'] += len(df)
-                
-                if freq_stats['min_date'] is None or stock_info['min_date'] < freq_stats['min_date']:
-                    freq_stats['min_date'] = stock_info['min_date']
-                if freq_stats['max_date'] is None or stock_info['max_date'] > freq_stats['max_date']:
-                    freq_stats['max_date'] = stock_info['max_date']
+                df = read_parquet_safe(parquet_file)
+                if df is not None and 'datetime' in df.columns:
+                    stock_code = parquet_file.stem
+                    
+                    stock_info = {
+                        'code': stock_code,
+                        'record_count': len(df),
+                        'min_date': df['datetime'].min(),
+                        'max_date': df['datetime'].max()
+                    }
+                    
+                    freq_stats['stocks'].append(stock_info)
+                    freq_stats['total_records'] += len(df)
+                    
+                    if freq_stats['min_date'] is None or stock_info['min_date'] < freq_stats['min_date']:
+                        freq_stats['min_date'] = stock_info['min_date']
+                    if freq_stats['max_date'] is None or stock_info['max_date'] > freq_stats['max_date']:
+                        freq_stats['max_date'] = stock_info['max_date']
                     
             except Exception as e:
                 logger.warning(f"读取文件失败 {parquet_file.name}: {e}")
@@ -542,45 +582,177 @@ def scan_parquet_data(frequency: Optional[str] = None) -> Dict:
     return stats
 
 
+def scan_database_data(frequency: Optional[str] = None) -> Dict:
+    """扫描数据库中的数据，收集统计信息
+    
+    Args:
+        frequency: 指定频率，如 '5m'、'1d'，None 表示扫描所有频率
+        
+    Returns:
+        统计信息字典
+    """
+    import sqlite3
+    from app.database import get_db_connection, DatabaseConnection, DatabaseConfig
+    
+    stats = {
+        'frequencies': {},
+        'total_stocks': 0,
+        'total_records': 0
+    }
+    
+    try:
+        db_config = DatabaseConfig()
+        
+        # 直接使用 sqlite3 连接
+        # 直接指定数据库路径
+        db_path = '/Users/panshunxing/eclipse-workspace/BackQuant/backquant/backtest/data/market_data.sqlite3'
+        
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            
+            query = ""
+            if frequency:
+                query = f"WHERE `interval` = '{frequency}'"
+            
+            # 获取所有频率
+            interval_query = f"SELECT DISTINCT `interval` FROM dbbardata {query}"
+            cursor.execute(interval_query)
+            intervals = [row[0] for row in cursor.fetchall()]
+            
+            if not intervals:
+                return stats
+            
+            for interval in intervals:
+                # 获取该频率下的所有股票
+                symbol_query = f"SELECT DISTINCT symbol FROM dbbardata WHERE `interval` = '{interval}'"
+                cursor.execute(symbol_query)
+                symbols = [row[0] for row in cursor.fetchall()]
+                
+                if not symbols:
+                    continue
+                
+                freq_stats = {
+                    'stock_count': len(symbols),
+                    'stocks': [],
+                    'total_records': 0,
+                    'min_date': None,
+                    'max_date': None
+                }
+                
+                # 对每只股票进行统计
+                for symbol in symbols:
+                    stock_query = f"""
+                    SELECT 
+                        COUNT(*) as record_count,
+                        MIN(datetime) as min_date,
+                        MAX(datetime) as max_date
+                    FROM dbbardata 
+                    WHERE symbol = '{symbol}' AND `interval` = '{interval}'
+                    """
+                    
+                    cursor.execute(stock_query)
+                    result = cursor.fetchone()
+                    if result:
+                        record_count, min_date, max_date = result
+                        
+                        if min_date and max_date:
+                            # 处理混合格式的 datetime
+                            try:
+                                # 尝试解析不同格式
+                                if ' ' in min_date:
+                                    # 格式: '2024-04-10 20240410093500000'
+                                    date_part, time_part = min_date.split(' ')
+                                    # 只取日期部分
+                                    min_date = pd.to_datetime(date_part)
+                                    max_date = pd.to_datetime(max_date.split(' ')[0])
+                                else:
+                                    # 其他格式
+                                    min_date = pd.to_datetime(min_date)
+                                    max_date = pd.to_datetime(max_date)
+                            except Exception as e:
+                                logger.warning(f"解析日期失败 {symbol}: {e}")
+                                continue
+                            
+                            stock_info = {
+                                'code': symbol,
+                                'record_count': record_count,
+                                'min_date': min_date,
+                                'max_date': max_date
+                            }
+                            
+                            freq_stats['stocks'].append(stock_info)
+                            freq_stats['total_records'] += record_count
+                            
+                            if freq_stats['min_date'] is None or min_date < freq_stats['min_date']:
+                                freq_stats['min_date'] = min_date
+                            if freq_stats['max_date'] is None or max_date > freq_stats['max_date']:
+                                freq_stats['max_date'] = max_date
+                
+                if freq_stats['stocks']:
+                    stats['frequencies'][interval] = freq_stats
+                    stats['total_stocks'] += freq_stats['stock_count']
+                    stats['total_records'] += freq_stats['total_records']
+                        
+    except Exception as e:
+        logger.warning(f"扫描数据库失败: {e}")
+    
+    return stats
+
+
 def generate_data_completeness_matrix(stats: Dict, sample_size: int = 50, output_path: Optional[Path] = None):
     """生成数据完整性矩阵可视化
     
     Args:
         stats: 统计信息字典
         sample_size: 随机抽样股票数量
-        output_path: 输出文件路径
+        output_path: 输出文件路径或 BytesIO 对象
     """
     if not stats['frequencies']:
         logger.warning("没有数据可供可视化")
         return
     
-    fig = plt.figure(figsize=(16, 10))
-    gs = GridSpec(3, 1, figure=fig, height_ratios=[2, 1, 1])
+    # 过滤有效的频率数据
+    valid_frequencies = {freq: freq_stats for freq, freq_stats in stats['frequencies'].items() 
+                        if freq_stats.get('stocks')}
     
-    for idx, (freq, freq_stats) in enumerate(stats['frequencies'].items()):
+    if not valid_frequencies:
+        logger.warning("没有有效的股票数据可供可视化")
+        return
+    
+    num_freqs = len(valid_frequencies)
+    fig = plt.figure(figsize=(16, 6 * num_freqs))
+    gs = GridSpec(num_freqs, 1, figure=fig)
+    
+    for idx, (freq, freq_stats) in enumerate(valid_frequencies.items()):
         if not freq_stats['stocks']:
             continue
         
         stocks = freq_stats['stocks']
+        
+        # 如果股票数超过 sample_size，则随机抽样
         if len(stocks) > sample_size:
             sampled_stocks = random.sample(stocks, sample_size)
+            logger.info(f"频率 {freq}: 从 {len(stocks)} 只股票中随机抽取 {sample_size} 只")
         else:
             sampled_stocks = stocks
         
         sampled_stocks.sort(key=lambda x: x['code'])
         
         if not sampled_stocks:
+            logger.warning(f"频率 {freq}: 没有有效的采样股票")
             continue
         
         min_date = min(s['min_date'] for s in sampled_stocks)
         max_date = max(s['max_date'] for s in sampled_stocks)
         
+        # 创建日期范围（按天）
         date_range = pd.date_range(start=min_date, end=max_date, freq='D')
         
+        # 构建矩阵：行=股票，列=日期，值=1表示有数据
         matrix = np.zeros((len(sampled_stocks), len(date_range)))
         
         for i, stock in enumerate(sampled_stocks):
-            stock_dates = pd.date_range(start=stock['min_date'], end=stock['max_date'], freq='D')
+            stock_dates = set(pd.date_range(start=stock['min_date'], end=stock['max_date'], freq='D'))
             for j, date in enumerate(date_range):
                 if date in stock_dates:
                     matrix[i, j] = 1
@@ -588,24 +760,31 @@ def generate_data_completeness_matrix(stats: Dict, sample_size: int = 50, output
         ax = fig.add_subplot(gs[idx])
         im = ax.imshow(matrix, aspect='auto', cmap='RdYlGn', interpolation='nearest')
         
-        ax.set_yticks(range(0, len(sampled_stocks), max(1, len(sampled_stocks) // 10)))
-        ax.set_yticklabels([sampled_stocks[i]['code'] for i in range(0, len(sampled_stocks), max(1, len(sampled_stocks) // 10))])
+        # 设置Y轴标签（股票代码）
+        y_step = max(1, len(sampled_stocks) // 10)
+        y_positions = range(0, len(sampled_stocks), y_step)
+        ax.set_yticks(list(y_positions))
+        ax.set_yticklabels([sampled_stocks[i]['code'] for i in y_positions], fontsize=8)
         
-        ax.set_xticks(range(0, len(date_range), max(1, len(date_range) // 10)))
-        ax.set_xticklabels([date_range[i].strftime('%Y-%m-%d') for i in range(0, len(date_range), max(1, len(date_range) // 10))], 
-                          rotation=45, ha='right')
+        # 设置X轴标签（日期）
+        x_step = max(1, len(date_range) // 15)  # 显示15个刻度
+        x_positions = range(0, len(date_range), x_step)
+        ax.set_xticks(list(x_positions))
+        ax.set_xticklabels([date_range[i].strftime('%m-%d') for i in x_positions], 
+                          rotation=45, ha='right', fontsize=8)
         
-        ax.set_title(f'{freq} 数据完整性矩阵（随机抽样 {len(sampled_stocks)} 只股票）', fontsize=12, fontweight='bold')
-        ax.set_xlabel('日期', fontsize=10)
-        ax.set_ylabel('股票代码', fontsize=10)
+        ax.set_title(f'{freq} Data Completeness Matrix ({len(sampled_stocks)} stocks sampled)', 
+                    fontsize=12, fontweight='bold')
+        ax.set_xlabel('Date', fontsize=10)
+        ax.set_ylabel('Stock Code', fontsize=10)
         
-        plt.colorbar(im, ax=ax, label='数据完整性（1=有数据，0=缺失）')
+        plt.colorbar(im, ax=ax, label='Data (1=Present, 0=Missing)')
     
     plt.tight_layout()
     
     if output_path:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        logger.info(f"数据完整性矩阵已保存到: {output_path}")
+        logger.info(f"Data completeness matrix saved to: {output_path}")
     else:
         plt.show()
     
@@ -617,40 +796,58 @@ def generate_data_distribution_histogram(stats: Dict, output_path: Optional[Path
     
     Args:
         stats: 统计信息字典
-        output_path: 输出文件路径
+        output_path: 输出文件路径或 BytesIO 对象
     """
     if not stats['frequencies']:
         logger.warning("没有数据可供可视化")
         return
     
-    fig, axes = plt.subplots(len(stats['frequencies']), 1, figsize=(12, 4 * len(stats['frequencies'])))
+    # 过滤有效的频率数据
+    valid_frequencies = []
+    for freq, freq_stats in stats['frequencies'].items():
+        if isinstance(freq_stats, dict) and freq_stats.get('stocks'):
+            valid_frequencies.append((freq, freq_stats))
     
-    if len(stats['frequencies']) == 1:
-        axes = [axes]
-    
-    for idx, (freq, freq_stats) in enumerate(stats['frequencies'].items()):
-        if not freq_stats['stocks']:
-            continue
+    if not valid_frequencies:
+        logger.warning("没有有效的数据可供可视化")
+        fig, ax = plt.subplots(1, 1, figsize=(12, 4))
+        ax.text(0.5, 0.5, 'No data available for visualization', ha='center', va='center', fontsize=14)
+        ax.set_title('Data Distribution', fontsize=12, fontweight='bold')
+    else:
+        num_freqs = len(valid_frequencies)
+        fig, axes = plt.subplots(num_freqs, 1, figsize=(12, 4 * max(num_freqs, 1)))
         
-        record_counts = [s['record_count'] for s in freq_stats['stocks']]
+        if num_freqs == 1:
+            axes = [axes]
         
-        axes[idx].hist(record_counts, bins=50, color='steelblue', edgecolor='black', alpha=0.7)
-        axes[idx].set_title(f'{freq} 数据量分布', fontsize=12, fontweight='bold')
-        axes[idx].set_xlabel('记录数', fontsize=10)
-        axes[idx].set_ylabel('股票数量', fontsize=10)
-        axes[idx].grid(axis='y', alpha=0.3)
-        
-        mean_count = np.mean(record_counts)
-        median_count = np.median(record_counts)
-        axes[idx].axvline(mean_count, color='red', linestyle='--', linewidth=2, label=f'平均值: {mean_count:.0f}')
-        axes[idx].axvline(median_count, color='orange', linestyle='--', linewidth=2, label=f'中位数: {median_count:.0f}')
-        axes[idx].legend()
+        for idx, (freq, freq_stats) in enumerate(valid_frequencies):
+            if not isinstance(freq_stats, dict) or not freq_stats.get('stocks'):
+                continue
+            
+            record_counts = [s['record_count'] for s in freq_stats['stocks']]
+            
+            n, bins, patches = axes[idx].hist(record_counts, bins=50, color='steelblue', 
+                                              edgecolor='black', alpha=0.7)
+            
+            axes[idx].set_title(f'{freq} Data Distribution (Total: {len(record_counts)} stocks)', 
+                               fontsize=12, fontweight='bold')
+            axes[idx].set_xlabel('Record Count', fontsize=10)
+            axes[idx].set_ylabel('Number of Stocks', fontsize=10)
+            axes[idx].grid(axis='y', alpha=0.3)
+            
+            mean_count = np.mean(record_counts)
+            median_count = np.median(record_counts)
+            axes[idx].axvline(mean_count, color='red', linestyle='--', linewidth=2, 
+                            label=f'Mean: {mean_count:.0f}')
+            axes[idx].axvline(median_count, color='orange', linestyle='--', linewidth=2, 
+                            label=f'Median: {median_count:.0f}')
+            axes[idx].legend(fontsize=9)
     
     plt.tight_layout()
     
     if output_path:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        logger.info(f"数据量分布直方图已保存到: {output_path}")
+        logger.info(f"Data distribution histogram saved to: {output_path}")
     else:
         plt.show()
     
@@ -662,51 +859,71 @@ def generate_update_timeliness_scatter(stats: Dict, output_path: Optional[Path] 
     
     Args:
         stats: 统计信息字典
-        output_path: 输出文件路径
+        output_path: 输出文件路径或 BytesIO 对象
     """
     if not stats['frequencies']:
         logger.warning("没有数据可供可视化")
         return
     
-    fig, axes = plt.subplots(len(stats['frequencies']), 1, figsize=(14, 5 * len(stats['frequencies'])))
+    # 过滤有效的频率数据
+    valid_frequencies = []
+    for freq, freq_stats in stats['frequencies'].items():
+        if isinstance(freq_stats, dict) and freq_stats.get('stocks'):
+            valid_frequencies.append((freq, freq_stats))
     
-    if len(stats['frequencies']) == 1:
-        axes = [axes]
-    
-    now = datetime.now()
-    
-    for idx, (freq, freq_stats) in enumerate(stats['frequencies'].items()):
-        if not freq_stats['stocks']:
-            continue
+    if not valid_frequencies:
+        logger.warning("没有有效的数据可供可视化")
+        fig, ax = plt.subplots(1, 1, figsize=(14, 5))
+        ax.text(0.5, 0.5, 'No data available for visualization', ha='center', va='center', fontsize=14)
+        ax.set_title('Data Update Timeliness', fontsize=12, fontweight='bold')
+    else:
+        num_freqs = len(valid_frequencies)
+        fig, axes = plt.subplots(num_freqs, 1, figsize=(14, 5 * max(num_freqs, 1)))
         
-        stocks = freq_stats['stocks']
-        stock_codes = [s['code'] for s in stocks]
-        max_dates = [s['max_date'] for s in stocks]
-        record_counts = [s['record_count'] for s in stocks]
+        if num_freqs == 1:
+            axes = [axes]
         
-        days_ago = [(now - md).days for md in max_dates]
+        now = datetime.now()
         
-        scatter = axes[idx].scatter(range(len(stocks)), days_ago, 
-                                   c=record_counts, cmap='viridis', 
-                                   alpha=0.6, s=50, edgecolors='black', linewidth=0.5)
-        
-        axes[idx].axhline(y=7, color='red', linestyle='--', linewidth=1, label='7天前')
-        axes[idx].axhline(y=30, color='orange', linestyle='--', linewidth=1, label='30天前')
-        
-        axes[idx].set_title(f'{freq} 数据更新时效性', fontsize=12, fontweight='bold')
-        axes[idx].set_xlabel('股票索引', fontsize=10)
-        axes[idx].set_ylabel('距今天数', fontsize=10)
-        axes[idx].grid(alpha=0.3)
-        axes[idx].legend()
-        
-        cbar = plt.colorbar(scatter, ax=axes[idx])
-        cbar.set_label('记录数', fontsize=10)
+        for idx, (freq, freq_stats) in enumerate(valid_frequencies):
+            if not isinstance(freq_stats, dict) or not freq_stats.get('stocks'):
+                continue
+            
+            stocks = freq_stats['stocks']
+            
+            # 准备数据
+            stock_indices = list(range(len(stocks)))
+            max_dates = [s['max_date'] for s in stocks]
+            record_counts = [s['record_count'] for s in stocks]
+            
+            # 计算距今天数
+            days_ago = [(now - md).days for md in max_dates]
+            
+            # 绘制散点图，颜色表示记录数
+            scatter = axes[idx].scatter(stock_indices, days_ago, 
+                                       c=record_counts, cmap='viridis', 
+                                       alpha=0.6, s=50, edgecolors='black', linewidth=0.5)
+            
+            # 添加参考线
+            axes[idx].axhline(y=7, color='red', linestyle='--', linewidth=1.5, alpha=0.8, label='7 days ago')
+            axes[idx].axhline(y=30, color='orange', linestyle='--', linewidth=1.5, alpha=0.8, label='30 days ago')
+            
+            axes[idx].set_title(f'{freq} Data Update Timeliness (Total: {len(stocks)} stocks)', 
+                               fontsize=12, fontweight='bold')
+            axes[idx].set_xlabel('Stock Index', fontsize=10)
+            axes[idx].set_ylabel('Days Ago', fontsize=10)
+            axes[idx].grid(alpha=0.3)
+            axes[idx].legend(fontsize=9)
+            
+            # 添加颜色条
+            cbar = plt.colorbar(scatter, ax=axes[idx])
+            cbar.set_label('Record Count', fontsize=10)
     
     plt.tight_layout()
     
     if output_path:
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        logger.info(f"更新时效性散点图已保存到: {output_path}")
+        logger.info(f"Update timeliness scatter plot saved to: {output_path}")
     else:
         plt.show()
     
@@ -778,10 +995,13 @@ def run_data_inspection(frequency: Optional[str] = None):
         logger.info("检查频率: 所有频率")
     
     logger.info("\n正在扫描数据...")
+    
+    # 只扫描 Parquet 目录
     stats = scan_parquet_data(frequency)
     
     if not stats['frequencies']:
-        logger.warning("未找到任何 Parquet 数据文件")
+        logger.warning("Parquet 目录为空，请先运行数据转换或下载任务")
+        logger.warning(f"当前 Parquet 目录: {parquet_root}")
         return
     
     print_inspection_report(stats)

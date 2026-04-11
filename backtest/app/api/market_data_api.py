@@ -5,6 +5,8 @@ import os
 import re
 import sys
 from datetime import datetime
+import base64
+from io import BytesIO
 
 from app.auth import auth_required
 from app.database import get_db_connection, get_db_type
@@ -12,6 +14,10 @@ from app.market_data.task_manager import get_task_manager
 from app.market_data.analyzer import analyze_bundle
 from app.market_data.tasks import do_incremental_update, do_full_download
 from app.market_data.utils import is_current_month_updated, get_market_data_db_path
+
+# Add imports for data inspection
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'scripts'))
+from scripts.sync_market_data import scan_parquet_data, generate_data_completeness_matrix, generate_data_distribution_histogram, generate_update_timeliness_scatter, print_inspection_report
 
 bp_market_data = Blueprint('market_data', __name__, url_prefix='/api/market-data')
 
@@ -299,6 +305,76 @@ def update_cron_config():
         return jsonify({'error': str(e)}), 500
 
 
+@bp_market_data.route('/cron/config/5min', methods=['GET'])
+@auth_required
+def get_cron_config_5min():
+    """Get 5min cron configuration."""
+    try:
+        with get_db_connection('market_data') as db:
+            row = db.fetchone("SELECT * FROM market_data_cron_config_5min WHERE id = 1")
+            if not row:
+                db.execute(
+                    """INSERT INTO market_data_cron_config_5min
+                       (id, enabled, cron_expression, task_type, script_path, updated_at)
+                       VALUES (1, 1, '*/5 * * * *', '5min', '/Users/panshunxing/eclipse-workspace/BackQuant/backquant/backtest/scripts/fetch_all_stocks_5min.py', ?)""",
+                    (datetime.utcnow().isoformat(),)
+                )
+                return jsonify({
+                    'enabled': True,
+                    'cron_expression': '*/5 * * * *',
+                    'task_type': '5min'
+                }), 200
+        # 只返回需要的字段，移除 script_path
+        return jsonify({
+            'enabled': row.get('enabled', True),
+            'cron_expression': row.get('cron_expression', '*/5 * * * *'),
+            'task_type': row.get('task_type', '5min')
+        }), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp_market_data.route('/cron/config/5min', methods=['PUT'])
+@auth_required
+def update_cron_config_5min():
+    """Update 5min cron configuration."""
+    data = request.json
+    enabled = data.get('enabled', True)
+    cron_expression = data.get('cron_expression', '*/5 * * * *')
+    task_type = data.get('task_type', '5min')
+    # 硬编码脚本路径
+    script_path = '/Users/panshunxing/eclipse-workspace/BackQuant/backquant/backtest/scripts/fetch_all_stocks_5min.py'
+
+    if task_type != '5min':
+        return jsonify({'error': '无效的任务类型'}), 400
+
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        try:
+            CronTrigger.from_crontab(cron_expression)
+        except Exception:
+            return jsonify({'error': '无效的 cron 表达式'}), 400
+
+        with get_db_connection('market_data') as db:
+            db.replace_into(
+                'market_data_cron_config_5min',
+                ['id', 'enabled', 'cron_expression', 'task_type', 'script_path', 'updated_at'],
+                (1, 1 if enabled else 0, cron_expression, task_type, script_path, datetime.utcnow().isoformat())
+            )
+
+        from app.market_data.scheduler import update_5min_cron_schedule
+        if enabled:
+            update_5min_cron_schedule(cron_expression, script_path)
+        else:
+            update_5min_cron_schedule(None, None)
+
+        return jsonify({'message': '配置已更新'}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @bp_market_data.route('/logs', methods=['DELETE'])
 @auth_required
 def clear_all_logs():
@@ -572,6 +648,64 @@ def trigger_vnpy_import():
 
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 409
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@bp_market_data.route('/inspection', methods=['GET'])
+@auth_required
+def get_data_inspection():
+    """Get data inspection report with visualizations."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+
+        # Get frequency parameter from request
+        frequency = request.args.get('frequency', None)
+
+        # Scan data
+        stats = scan_parquet_data(frequency)
+
+        if not stats['frequencies']:
+            return jsonify({'error': '未找到任何 Parquet 数据文件'}), 404
+
+        # Generate completeness matrix
+        matrix_buffer = BytesIO()
+        generate_data_completeness_matrix(stats, sample_size=50, output_path=matrix_buffer)
+        matrix_buffer.seek(0)
+        matrix_base64 = base64.b64encode(matrix_buffer.read()).decode('utf-8')
+        matrix_buffer.close()
+
+        # Generate distribution histogram
+        hist_buffer = BytesIO()
+        generate_data_distribution_histogram(stats, output_path=hist_buffer)
+        hist_buffer.seek(0)
+        hist_base64 = base64.b64encode(hist_buffer.read()).decode('utf-8')
+        hist_buffer.close()
+
+        # Generate timeliness scatter
+        scatter_buffer = BytesIO()
+        generate_update_timeliness_scatter(stats, output_path=scatter_buffer)
+        scatter_buffer.seek(0)
+        scatter_base64 = base64.b64encode(scatter_buffer.read()).decode('utf-8')
+        scatter_buffer.close()
+
+        # Close all plots to free memory
+        plt.close('all')
+
+        # Prepare response data
+        response = {
+            'stats': stats,
+            'visualizations': {
+                'completeness_matrix': matrix_base64,
+                'distribution_histogram': hist_base64,
+                'timeliness_scatter': scatter_base64
+            }
+        }
+
+        return jsonify(response), 200
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

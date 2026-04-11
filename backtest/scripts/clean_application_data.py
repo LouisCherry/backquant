@@ -36,6 +36,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import CONFIG
+from app.utils.parquet_utils import read_parquet_safe, write_parquet_safe
 
 # 配置日志
 logging.basicConfig(
@@ -115,7 +116,7 @@ class DataCleaner:
             elif ext in ['.xlsx', '.xls']:
                 return pd.read_excel(file_path)
             elif ext == '.parquet':
-                return pd.read_parquet(file_path)
+                return read_parquet_safe(file_path)
             elif ext == '.h5':
                 return pd.read_hdf(file_path)
         except Exception as e:
@@ -259,7 +260,11 @@ class DataCleaner:
             elif file_path.suffix.lower() in ['.xlsx', '.xls']:
                 df.to_excel(output_path, index=False)
             elif file_path.suffix.lower() == '.parquet':
-                df.to_parquet(output_path, index=False)
+                if write_parquet_safe(df, output_path, index=False):
+                    logger.info(f"清洗后数据已保存到: {output_path}")
+                    return True
+                else:
+                    return False
             
             logger.info(f"清洗后数据已保存到: {output_path}")
             return True
@@ -277,9 +282,11 @@ class DataCleaner:
         output_path = output_dir / f"{file_path.stem}_{timestamp}.parquet"
         
         try:
-            df.to_parquet(output_path, index=False, compression='snappy')
-            logger.info(f"数据已转换为 Parquet 格式: {output_path}")
-            return True
+            if write_parquet_safe(df, output_path, index=False, compression='snappy'):
+                logger.info(f"数据已转换为 Parquet 格式: {output_path}")
+                return True
+            else:
+                return False
         except Exception as e:
             logger.error(f"转换为 Parquet 失败 {output_path}: {e}")
             return False

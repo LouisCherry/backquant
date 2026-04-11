@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pickle
 import re
 from pathlib import Path
@@ -8,6 +9,18 @@ from pathlib import Path
 import pandas as pd
 
 _DATE_COLUMN_TOKENS = ("date", "time", "datetime", "timestamp")
+
+
+def _sanitize_nan(obj):
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    return obj
 
 
 def _json_default(obj):
@@ -285,13 +298,13 @@ def extract_result(result_pkl: Path, out_json: Path) -> dict:
     equity["benchmark_nav"] = benchmark_nav if isinstance(benchmark_nav, list) else []
     trades, trade_columns = _extract_trades(r.get("trades")) if "trades" in r else ([], [])
 
-    payload = {
+    payload = _sanitize_nan({
         "summary": summary,
         "equity": equity,
         "trades": trades,
         "trade_columns": trade_columns,
         "raw_keys": sorted([str(key) for key in r.keys()]),
-    }
+    })
     out_json.write_text(
         json.dumps(payload, ensure_ascii=False, default=_json_default),
         encoding="utf-8",

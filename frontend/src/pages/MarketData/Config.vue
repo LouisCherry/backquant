@@ -70,6 +70,53 @@
     />
 
     <TaskProgress v-if="currentTaskId" :task-id="currentTaskId" @task-complete="handleTaskComplete" />
+
+    <!-- 5分钟数据定时任务配置 -->
+    <div class="config-panel">
+      <div class="panel-header">
+        <h3>5分钟数据定时任务配置</h3>
+        <span class="header-hint">拉取5分钟数据，脚本路径可在下方设置</span>
+      </div>
+      <div class="panel-body">
+        <div v-if="config5minLoading" class="loading-state">加载配置中...</div>
+        <div v-else>
+          <div class="form-section">
+            <label class="checkbox-label">
+              <input type="checkbox" v-model="config5min.enabled" class="checkbox" :disabled="hasRunningTask" />
+              <span>启用定时任务</span>
+            </label>
+          </div>
+
+          <div class="form-section">
+            <div class="form-row">
+              <div class="form-field">
+                <label class="field-label">Cron 表达式</label>
+                <input
+                  v-model="config5min.cron_expression"
+                  type="text"
+                  placeholder="0 0 * * *"
+                  class="text-input"
+                  :disabled="hasRunningTask"
+                />
+                <span class="hint-text">示例: 0 0 * * * (每天凌晨0点)</span>
+              </div>
+              <div class="form-field">
+                <label class="field-label">任务类型</label>
+                <div class="text-display">5分钟数据</div>
+              </div>
+            </div>
+          </div>
+
+
+
+          <div class="form-actions">
+            <button @click="saveConfig5min" class="btn btn-primary" :disabled="saving5min || hasRunningTask">
+              {{ saving5min ? '保存中...' : '保存配置' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -92,8 +139,15 @@ export default {
         cron_expression: '0 4 3 * *',
         task_type: 'full'
       },
+      config5min: {
+        enabled: true,
+        cron_expression: '*/5 * * * *',
+        task_type: '5min'
+      },
       configLoading: true,
+      config5minLoading: true,
       saving: false,
+      saving5min: false,
       currentTaskId: null,
       showConfirm: false,
       confirmMessage: '',
@@ -105,6 +159,7 @@ export default {
   },
   mounted() {
     this.loadConfig();
+    this.loadConfig5min();
     this.checkRunningTask();
   },
   methods: {
@@ -242,6 +297,54 @@ export default {
     formatDate(dateStr) {
       if (!dateStr) return '-';
       return new Date(dateStr).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    },
+    async loadConfig5min() {
+      this.config5minLoading = true;
+      try {
+        const response = await fetch('/api/market-data/cron/config/5min', {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          // Convert enabled from integer to boolean
+          this.config5min = {
+            ...data,
+            enabled: Boolean(data.enabled)
+          };
+        }
+      } catch (err) {
+        console.error('Failed to load 5min config:', err);
+      } finally {
+        this.config5minLoading = false;
+      }
+    },
+    async saveConfig5min() {
+      this.saving5min = true;
+
+      try {
+        const response = await fetch('/api/market-data/cron/config/5min', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          },
+          body: JSON.stringify(this.config5min)
+        });
+
+        if (response.ok) {
+          alert('配置已保存');
+        } else {
+          const data = await response.json();
+          alert(data.error || '保存失败');
+        }
+      } catch (err) {
+        alert('网络错误，请重试');
+      } finally {
+        this.saving5min = false;
+      }
     }
   }
 };

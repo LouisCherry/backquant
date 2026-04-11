@@ -4,6 +4,8 @@ from rqalpha.api import *
 def init(context):
     context.s1 = "000001.XSHE"
     
+    # 沪深300指数（000300.XSHG）是在2005年4月8日才正式发布的
+    
     # 1. 订阅股票（RQAlpha 6.x 只接受一个参数）
     subscribe(context.s1)
     
@@ -13,6 +15,8 @@ def init(context):
     context.SMOOTHPERIOD = 9
     context.OBSERVATION = 200  # 需要足够的历史数据
     
+    context.slippage = 0.0001    # 设置滑点
+    context.commission = 0.0002  # 设置手续费率
     logger.info("策略初始化完成，使用 1m 频率模拟 60m 逻辑")
 
 def handle_bar(context, bar_dict):

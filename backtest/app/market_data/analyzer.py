@@ -9,6 +9,7 @@ import pandas as pd
 from app.database import get_db_connection
 from app.config import CONFIG
 from app.utils.path_manager import path_manager
+from app.utils.parquet_utils import read_parquet_safe
 
 
 # ==================== 数据源抽象接口 ====================
@@ -178,13 +179,14 @@ class ParquetDataSource(DataSource):
         for pattern in search_patterns:
             for parquet_file in self.base_path.rglob(pattern):
                 if parquet_file.suffix == '.parquet':
-                    df = pd.read_parquet(parquet_file)
-                    # Filter by date range
-                    if 'date' in df.columns:
-                        df['date'] = pd.to_datetime(df['date'])
-                        mask = (df['date'] >= start_date) & (df['date'] <= end_date)
-                        df = df[mask]
-                    return df
+                    df = read_parquet_safe(parquet_file)
+                    if df is not None:
+                        # Filter by date range
+                        if 'date' in df.columns:
+                            df['date'] = pd.to_datetime(df['date'])
+                            mask = (df['date'] >= start_date) & (df['date'] <= end_date)
+                            df = df[mask]
+                        return df
         return pd.DataFrame()
     
     def get_all_securities(self, data_type: str) -> List[str]:

@@ -935,9 +935,25 @@ def api_delete_job(job_id: str):
     return _ok_response({"job_id": job_id, "deleted": True}, message="deleted")
 
 
+import math
+
+
+def _sanitize_nan(obj):
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    return obj
+
+
 def _normalize_result_payload(payload: dict) -> dict:
     if not isinstance(payload, dict):
         payload = {}
+    payload = _sanitize_nan(payload)
     summary = payload.get("summary")
     if not isinstance(summary, dict):
         summary = {}

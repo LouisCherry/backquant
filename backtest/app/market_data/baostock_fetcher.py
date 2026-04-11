@@ -16,6 +16,7 @@ from pathlib import Path
 
 from app.market_data.akshare_fetcher import _get_parquet_root
 from app.market_data.data_writer import get_data_writer, DataWriterFactory
+from app.utils.parquet_utils import read_parquet_safe, write_parquet_safe
 
 logger = logging.getLogger(__name__)
 
@@ -294,10 +295,6 @@ def save_minute_data_to_parquet(
     
     # Use data writer factory for flexible output format
     writer = get_data_writer()
-    
-    # Ensure datetime column is string for consistency
-    if 'datetime' in df.columns:
-        df['datetime'] = df['datetime'].astype(str)
     
     # Try to read existing data for merge (if using parquet)
     try:

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from flask import current_app
 from app.database import DatabaseConnection, get_db_connection
+from app.config import CONFIG
 
 _STRATEGY_ID_PATTERN = re.compile(r"^[A-Za-z0-9._\-\u4E00-\u9FFF]+$")
 _STRATEGY_ID_MAX_LENGTH = 128
@@ -1675,14 +1676,41 @@ def compile_strategy_debug(code: str, *, timeout_seconds: int = 10) -> tuple[dic
 def run_rqalpha(job_id: str, job_dir: Path) -> int:
     timeout = int(current_app.config.get("BACKTEST_TIMEOUT", 900))
     log_path = job_dir / "run.log"
-    command = [
-        *_resolve_rqalpha_command(),
-        "run",
-        "-f",
-        "strategy.py",
-        "--config",
-        "config.yml",
-    ]
+    
+    # 读取配置文件，检查频率
+    config_path = job_dir / "config.yml"
+    frequency = "1d"
+    if config_path.exists():
+        import yaml
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        frequency = config.get('base', {}).get('frequency', '1d')
+    
+    # 根据频率选择不同的运行方式
+    if frequency == '5m':
+        # 对于5分钟频率，使用专门的启动脚本
+        # 这个脚本会在RQAlpha初始化之前完成所有必要的monkey patching
+        run_5min_script = Path(__file__).parent / "run_5min_backtest.py"
+        # 使用venv中的Python，确保能找到fastparquet等依赖
+        venv_python = _project_root() / "venv" / "bin" / "python"
+        python_bin = str(venv_python) if venv_python.exists() else sys.executable
+        command = [
+            python_bin,
+            str(run_5min_script),
+            "strategy.py",
+            "config.yml",
+        ]
+    else:
+        # 对于其他频率，使用标准的rqalpha命令
+        command = [
+            *_resolve_rqalpha_command(),
+            "run",
+            "-f",
+            "strategy.py",
+            "--config",
+            "config.yml",
+        ]
+    
     with log_path.open("w", encoding="utf-8") as log_file:
         proc = subprocess.Popen(
             command,
@@ -1941,6 +1969,51 @@ def _run_rqalpha_in_process(*, strategy_path: Path, config: dict, log_path: Path
 
     with log_path.open("a", encoding="utf-8") as log_file, redirect_stdout(log_file), redirect_stderr(log_file):
         try:
+            # Monkey patch RQAlpha to support 5min frequency
+            from rqalpha.mod.rqalpha_mod_sys_simulation import mod
+            original_parse_matching_type = mod.SimulationMod.parse_matching_type
+            
+            @staticmethod
+            def patched_parse_matching_type(me_str, frequency):
+                if me_str is None:
+                    # None 表示根据 frequency 自动选择
+                    if frequency in ["1d", "1m", "5m"]:
+                        me_str = "current_bar"
+                    elif frequency == "tick":
+                        me_str = "last"
+                    else:
+                        raise ValueError("frequency only support ['1d', '1m', '5m', 'tick']")
+                
+                # 调用原始方法的剩余逻辑
+                assert isinstance(me_str, str)
+                me_str = me_str.lower()
+                if me_str == "current_bar":
+                    from rqalpha.const import MATCHING_TYPE
+                    return MATCHING_TYPE.CURRENT_BAR_CLOSE
+                if me_str == "vwap":
+                    from rqalpha.const import MATCHING_TYPE
+                    return MATCHING_TYPE.VWAP
+                elif me_str == "next_bar":
+                    from rqalpha.const import MATCHING_TYPE
+                    return MATCHING_TYPE.NEXT_BAR_OPEN
+                elif me_str == "last":
+                    from rqalpha.const import MATCHING_TYPE
+                    return MATCHING_TYPE.NEXT_TICK_LAST
+                elif me_str == "best_own":
+                    from rqalpha.const import MATCHING_TYPE
+                    return MATCHING_TYPE.NEXT_TICK_BEST_OWN
+                elif me_str == "best_counterparty":
+                    from rqalpha.const import MATCHING_TYPE
+                    return MATCHING_TYPE.NEXT_TICK_BEST_COUNTERPARTY
+                elif me_str == "counterparty_offer":
+                    from rqalpha.const import MATCHING_TYPE
+                    return MATCHING_TYPE.COUNTERPARTY_OFFER
+                else:
+                    raise NotImplementedError
+            
+            mod.SimulationMod.parse_matching_type = patched_parse_matching_type
+            print("[DEBUG] Monkey patched SimulationMod.parse_matching_type to support 5min frequency")
+            
             # 如果使用 Parquet 数据源，需要注入自定义数据源
             if data_source_type == 'parquet':
                 # 对于 Parquet 数据源，我们需要修改 RQAlpha 的数据加载逻辑
@@ -2047,8 +2120,9 @@ def run_backtest(params: dict) -> dict:
     run_logger, file_handler = _create_file_logger(run_id, log_path)
     run_logger.info("backtest run started: run_id=%s", run_id)
     
-    # 获取数据源类型（从环境变量或参数）
-    data_source_type = params.get('data_source_type') or os.environ.get('MARKET_DATA_STORAGE_TYPE', 'hdf5')
+    # 获取数据源类型（从参数、环境变量或配置文件）
+    # 优先级: params > 环境变量 > 配置文件默认值
+    data_source_type = params.get('data_source_type') or os.environ.get('DATA_SOURCE', CONFIG['default'].DATA_SOURCE)
     run_logger.info("data source type: %s", data_source_type)
 
     try:

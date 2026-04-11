@@ -3,9 +3,9 @@
 
 综合优化：
 1. 复用Baostock连接：每个线程只登录一次，所有月份查询复用同一连接
-2. 批量插入数据库：使用 executemany 替代逐条 replace_into
+2. 批量写入Parquet：使用 pandas DataFrame 和 write_parquet_safe 函数
 3. 多进程支持：使用 multiprocessing 替代 threading，绕过GIL
-4. 连接池：每个进程维护独立的数据库连接和Baostock连接
+4. 连接池：每个进程维护独立的Baostock连接
 
 用法示例:
     # 获取所有A股近两年5分钟数据（默认8进程）
@@ -35,15 +35,17 @@ import argparse
 import baostock as bs
 import h5py
 import pickle
-import sqlite3
 import time
 import logging
 import json
 import multiprocessing
+import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+from app.utils.parquet_utils import write_parquet_safe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -122,33 +124,12 @@ def get_exchange_from_symbol(symbol: str) -> str:
     return 'SZ'
 
 
-def _get_db_path() -> str:
+def _get_parquet_path(symbol: str) -> Path:
+    """获取股票的Parquet文件路径"""
     project_root = Path(__file__).resolve().parent.parent
-    base_dir = os.environ.get('BACKTEST_BASE_DIR', '')
-    if not base_dir:
-        base_dir = str(project_root / 'data')
-    return str(Path(base_dir) / 'market_data.sqlite3')
-
-
-def _ensure_table(conn: sqlite3.Connection):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS dbbardata (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            exchange TEXT NOT NULL,
-            datetime TEXT NOT NULL,
-            interval TEXT NOT NULL,
-            volume REAL NOT NULL,
-            turnover REAL NOT NULL,
-            open_interest REAL NOT NULL,
-            open_price REAL NOT NULL,
-            high_price REAL NOT NULL,
-            low_price REAL NOT NULL,
-            close_price REAL NOT NULL,
-            UNIQUE(symbol, exchange, interval, datetime)
-        )
-    """)
-    conn.commit()
+    parquet_dir = project_root / 'data' / 'parquet' / '5m'
+    code = symbol.split('.')[0] if '.' in symbol else symbol
+    return parquet_dir / f"{code}.parquet"
 
 
 def load_progress() -> Dict:
@@ -168,8 +149,8 @@ def save_progress(progress: Dict):
         json.dump(progress, f, ensure_ascii=False, indent=2)
 
 
-def _parse_row(row_data: list, code: str, exchange: str) -> Optional[tuple]:
-    """解析单行数据为数据库记录元组"""
+def _parse_row(row_data: list, code: str, exchange: str) -> Optional[Dict]:
+    """解析单行数据为字典格式"""
     time_str = row_data[1] if len(row_data) > 1 else ''
     if not time_str:
         return None
@@ -185,16 +166,19 @@ def _parse_row(row_data: list, code: str, exchange: str) -> Optional[tuple]:
         except (ValueError, TypeError):
             return default
 
-    return (
-        code, exchange, dt_str, '5m',
-        safe_float(row_data[6] if len(row_data) > 6 else 0),
-        safe_float(row_data[7] if len(row_data) > 7 else 0),
-        0.0,
-        safe_float(row_data[2] if len(row_data) > 2 else 0),
-        safe_float(row_data[3] if len(row_data) > 3 else 0),
-        safe_float(row_data[4] if len(row_data) > 4 else 0),
-        safe_float(row_data[5] if len(row_data) > 5 else 0),
-    )
+    return {
+        'symbol': code,
+        'exchange': exchange,
+        'datetime': dt_str,
+        'interval': '5m',
+        'volume': safe_float(row_data[6] if len(row_data) > 6 else 0),
+        'turnover': safe_float(row_data[7] if len(row_data) > 7 else 0),
+        'open_interest': 0.0,
+        'open_price': safe_float(row_data[2] if len(row_data) > 2 else 0),
+        'high_price': safe_float(row_data[3] if len(row_data) > 3 else 0),
+        'low_price': safe_float(row_data[4] if len(row_data) > 4 else 0),
+        'close_price': safe_float(row_data[5] if len(row_data) > 5 else 0),
+    }
 
 
 def fetch_5min_single_stock(
@@ -203,11 +187,11 @@ def fetch_5min_single_stock(
     end_date: str,
     incremental: bool = True
 ) -> Tuple[str, bool, int, str]:
-    """获取单只股票的5分钟数据（进程安全，复用连接，批量插入）
+    """获取单只股票的5分钟数据（进程安全，复用连接，批量写入Parquet）
 
     优化点：
     1. Baostock 只登录一次，所有月份查询复用连接
-    2. 数据库只连接一次，批量 executemany 插入
+    2. 批量写入Parquet：使用 pandas DataFrame 和 write_parquet_safe 函数
     3. 内存中累积所有月份的数据，最后一次写入
 
     Returns:
@@ -219,23 +203,19 @@ def fetch_5min_single_stock(
 
     exchange = get_exchange_from_symbol(symbol)
     code = symbol.split('.')[0] if '.' in symbol else symbol
-    db_path = _get_db_path()
+    parquet_path = _get_parquet_path(symbol)
 
     # 增量检查
     effective_start = start_date
     if incremental:
         try:
-            conn = sqlite3.connect(db_path)
-            row = conn.execute(
-                "SELECT MAX(datetime) FROM dbbardata WHERE symbol = ? AND interval = '5m'",
-                (code,)
-            ).fetchone()
-            conn.close()
-            if row and row[0]:
-                last_date = datetime.strptime(row[0][:10], '%Y-%m-%d')
-                effective_start = (last_date + timedelta(days=1)).strftime('%Y-%m-%d')
-                if effective_start > end_date:
-                    return symbol, True, 0, "数据已是最新"
+            if parquet_path.exists():
+                df = pd.read_parquet(parquet_path)
+                if not df.empty:
+                    last_date = df['datetime'].max().strftime('%Y-%m-%d')
+                    effective_start = (datetime.strptime(last_date, '%Y-%m-%d') + timedelta(days=1)).strftime('%Y-%m-%d')
+                    if effective_start > end_date:
+                        return symbol, True, 0, "数据已是最新"
         except Exception:
             pass
 
@@ -315,22 +295,31 @@ def fetch_5min_single_stock(
             except Exception:
                 pass
 
-    # 批量写入数据库
+    # 批量写入Parquet
     if all_records:
         try:
-            conn = sqlite3.connect(db_path)
-            _ensure_table(conn)
-            conn.executemany(
-                """INSERT OR REPLACE INTO dbbardata
-                   (symbol, exchange, datetime, interval, volume, turnover,
-                    open_interest, open_price, high_price, low_price, close_price)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                all_records
-            )
-            conn.commit()
-            conn.close()
+            # 转换为DataFrame
+            df = pd.DataFrame(all_records)
+            
+            # 如果文件已存在，先读取并合并数据
+            if parquet_path.exists() and incremental:
+                try:
+                    existing_df = pd.read_parquet(parquet_path)
+                    df = pd.concat([existing_df, df])
+                    # 去重，保持唯一的(symbol, datetime, interval)组合
+                    df = df.drop_duplicates(subset=['symbol', 'datetime', 'interval'])
+                    # 按时间排序
+                    df = df.sort_values('datetime')
+                except Exception:
+                    pass
+            
+            # 写入Parquet文件
+            if write_parquet_safe(df, parquet_path):
+                return symbol, True, len(all_records), f"获取 {len(all_records)} 条记录"
+            else:
+                return symbol, False, 0, "Parquet文件写入失败"
         except Exception as e:
-            return symbol, False, 0, f"数据库写入失败: {e}"
+            return symbol, False, 0, f"数据处理失败: {e}"
 
     return symbol, True, len(all_records), f"获取 {len(all_records)} 条记录"
 
@@ -464,24 +453,44 @@ def show_progress():
         for s in failed[:20]:
             print(f"    {s}")
 
-    # 查询数据库统计
+    # 查询Parquet文件统计
     try:
-        db_path = _get_db_path()
-        conn = sqlite3.connect(db_path)
-        _ensure_table(conn)
-
-        total = conn.execute("SELECT COUNT(*) FROM dbbardata WHERE interval='5m'").fetchone()[0]
-        symbols = conn.execute("SELECT COUNT(DISTINCT symbol) FROM dbbardata WHERE interval='5m'").fetchone()[0]
-        row3 = conn.execute("SELECT MIN(datetime), MAX(datetime) FROM dbbardata WHERE interval='5m'").fetchone()
-
-        conn.close()
-
-        print(f"\n  数据库统计:")
-        print(f"    总记录数: {total}")
-        print(f"    股票数量: {symbols}")
-        print(f"    时间范围: {row3[0]} ~ {row3[1]}")
+        project_root = Path(__file__).resolve().parent.parent
+        parquet_dir = project_root / 'data' / 'parquet' / '5m'
+        
+        if parquet_dir.exists():
+            parquet_files = list(parquet_dir.glob('*.parquet'))
+            print(f"\n  Parquet文件统计:")
+            print(f"    股票数量: {len(parquet_files)}")
+            
+            # 统计总记录数和时间范围
+            total_records = 0
+            min_datetime = None
+            max_datetime = None
+            
+            for parquet_file in parquet_files[:10]:  # 只统计前10个文件，避免性能问题
+                try:
+                    import pandas as pd
+                    df = pd.read_parquet(parquet_file)
+                    total_records += len(df)
+                    if not df.empty:
+                        file_min = df['datetime'].min()
+                        file_max = df['datetime'].max()
+                        if min_datetime is None or file_min < min_datetime:
+                            min_datetime = file_min
+                        if max_datetime is None or file_max > max_datetime:
+                            max_datetime = file_max
+                except Exception:
+                    pass
+            
+            print(f"    总记录数: {total_records} (仅统计前10个文件)")
+            if min_datetime and max_datetime:
+                print(f"    时间范围: {min_datetime} ~ {max_datetime}")
+        else:
+            print(f"\n  Parquet文件统计:")
+            print(f"    目录不存在: {parquet_dir}")
     except Exception as e:
-        print(f"  数据库查询失败: {e}")
+        print(f"  Parquet文件查询失败: {e}")
 
 
 def main():
@@ -522,6 +531,8 @@ def main():
                         help='限制获取数量（0=不限制，测试用）')
     parser.add_argument('--progress', action='store_true',
                         help='查看下载进度')
+    parser.add_argument('--symbol', type=str,
+                        help='指定单个股票代码进行拉取，如 000001.XSHE')
 
     args = parser.parse_args()
 
@@ -533,6 +544,11 @@ def main():
     if not stock_list:
         print("错误: 无法获取股票列表")
         sys.exit(1)
+    
+    # 如果指定了单个股票，则只拉取该股票
+    if args.symbol:
+        stock_list = [args.symbol]
+        print(f"只拉取指定股票: {args.symbol}")
 
     end_date = args.end if args.end else datetime.now().strftime('%Y%m%d')
     start_date = args.start if args.start else (datetime.now() - timedelta(days=365*2)).strftime('%Y%m%d')

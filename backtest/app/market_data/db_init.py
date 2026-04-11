@@ -60,6 +60,17 @@ _SQLITE_DDL = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS market_data_cron_config_5min (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled INTEGER DEFAULT 0,
+        cron_expression TEXT,
+        task_type TEXT,
+        script_path TEXT,
+        updated_at TEXT NOT NULL
+    )
+    """,
+
+    """
     CREATE TABLE IF NOT EXISTS market_data_cron_logs (
         log_id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT,
@@ -156,6 +167,17 @@ _MARIADB_DDL = [
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
+    """
+    CREATE TABLE IF NOT EXISTS market_data_cron_config_5min (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled BOOLEAN DEFAULT FALSE,
+        cron_expression VARCHAR(100),
+        task_type VARCHAR(50),
+        script_path VARCHAR(500),
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+
     """
     CREATE TABLE IF NOT EXISTS market_data_cron_logs (
         log_id INTEGER PRIMARY KEY AUTO_INCREMENT,
@@ -279,6 +301,13 @@ def init_database_with_connection(db: DatabaseConnection):
             """
             INSERT INTO market_data_cron_config (id, enabled, cron_expression, task_type, updated_at)
             VALUES (1, TRUE, '0 4 3 * *', 'full', CURRENT_TIMESTAMP)
+            ON DUPLICATE KEY UPDATE id=id
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO market_data_cron_config_5min (id, enabled, cron_expression, task_type, script_path, updated_at)
+            VALUES (1, TRUE, '*/5 * * * *', '5min', '/Users/panshunxing/eclipse-workspace/BackQuant/backquant/backtest/scripts/fetch_all_stocks_5min.py', CURRENT_TIMESTAMP)
             ON DUPLICATE KEY UPDATE id=id
             """
         )
